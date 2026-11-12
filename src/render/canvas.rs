@@ -1,0 +1,444 @@
+use crate::config::{Config, parse_color};
+use crate::render::animations::{CursorGlideState, ShakeAnimation};
+use crate::render::text::FontRenderer;
+use tiny_skia::{
+    Color, FillRule, Paint, PathBuilder, Pixmap, PixmapMut, PixmapPaint, Rect, Stroke, Transform,
+};
+
+pub struct CardUiState<'a> {
+    pub username: &'a str,
+    pub display_name: Option<&'a str>,
+    pub password_len: usize,
+    pub capslock: bool,
+    pub layout: &'a str,
+    pub error: bool,
+    pub glide: &'a CursorGlideState,
+    pub shake: &'a ShakeAnimation,
+}
+
+pub struct UiRenderer {
+    font: FontRenderer,
+    cached_wallpaper: Option<Pixmap>,
+    cached_avatar: Option<Pixmap>,
+}
+
+impl UiRenderer {
+    pub fn new() -> anyhow::Result<Self> {
+        let font = FontRenderer::load_default()?;
+        Ok(Self {
+            font,
+            cached_wallpaper: None,
+            cached_avatar: None,
+        })
+    }
+
+    pub fn set_wallpaper(&mut self, pixmap: Pixmap) {
+        self.cached_wallpaper = Some(pixmap);
+    }
+
+    pub fn set_avatar(&mut self, pixmap: Pixmap) {
+        self.cached_avatar = Some(pixmap);
+    }
+
+    pub fn render_frame(
+        &self,
+        target: &mut PixmapMut,
+        cfg: &Config,
+        state: &CardUiState,
+        is_primary: bool,
+    ) {
+        let screen_w = target.width() as f32;
+        let screen_h = target.height() as f32;
+
+        if let Some(ref wall) = self.cached_wallpaper {
+            target.draw_pixmap(
+                0,
+                0,
+                wall.as_ref(),
+                &PixmapPaint::default(),
+                Transform::identity(),
+                None,
+            );
+        } else {
+            let solid = parse_color(&cfg.wallpaper.solid_color, 1.0);
+            target.fill(solid);
+        }
+
+        if !is_primary {
+            return;
+        }
+
+        self.draw_clock(target, cfg, screen_w, screen_h);
+
+        let shake_x = state.shake.offset_x();
+        let card_w = cfg.card.width;
+        let card_h = 320.0;
+        let card_x = ((screen_w - card_w) / 2.0 + shake_x).round();
+        let card_y = ((screen_h - card_h) / 2.0).round();
+
+        if let Some(card_rect) = Rect::from_xywh(card_x, card_y, card_w, card_h) {
+            self.draw_card(target, cfg, state, card_rect);
+        }
+    }
+
+    fn draw_clock(&self, target: &mut PixmapMut, cfg: &Config, screen_w: f32, screen_h: f32) {
+        let now = chrono_free_time();
+        let (time_str, date_str) = now;
+
+        let time_color = parse_color(&cfg.appearance.text_color, 0.92);
+        let date_color = parse_color(&cfg.appearance.muted_color, 0.85);
+
+        let (tw, th) = self.font.measure_text(&time_str, 54.0);
+        let tx = (screen_w - tw) / 2.0;
+        let ty = (screen_h * 0.18).round();
+        self.font
+            .draw_text(target, &time_str, tx, ty, 54.0, time_color);
+
+        let (dw, _) = self.font.measure_text(&date_str, 18.0);
+        let dx = (screen_w - dw) / 2.0;
+        let dy = ty + th + 18.0;
+        self.font
+            .draw_text(target, &date_str, dx, dy, 18.0, date_color);
+    }
+
+    fn draw_card(
+        &self,
+        target: &mut PixmapMut,
+        cfg: &Config,
+        state: &CardUiState,
+        card_rect: Rect,
+    ) {
+        let cx = card_rect.x();
+        let cy = card_rect.y();
+        let cw = card_rect.width();
+        let ch = card_rect.height();
+
+        let card_bg = parse_color(&cfg.card.background_color, cfg.card.opacity);
+        let mut bg_paint = Paint::default();
+        bg_paint.set_color(card_bg);
+        bg_paint.anti_alias = true;
+
+        let shadow_rect = Rect::from_xywh(cx - 2.0, cy + 4.0, cw + 4.0, ch + 8.0).unwrap();
+        let shadow_path = rounded_rect_path(shadow_rect, cfg.card.border_radius + 2.0);
+        let mut shadow_paint = Paint::default();
+        shadow_paint.set_color(Color::from_rgba(0.0, 0.0, 0.0, 0.28).unwrap());
+        target.fill_path(
+            &shadow_path,
+            &shadow_paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+
+        let card_path = rounded_rect_path(card_rect, cfg.card.border_radius);
+        target.fill_path(
+            &card_path,
+            &bg_paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+
+        let border_color = parse_color(&cfg.card.border_color, cfg.card.border_opacity);
+        let mut border_paint = Paint::default();
+        border_paint.set_color(border_color);
+        border_paint.anti_alias = true;
+        let stroke = Stroke {
+            width: 1.0,
+            ..Default::default()
+        };
+        target.stroke_path(
+            &card_path,
+            &border_paint,
+            &stroke,
+            Transform::identity(),
+            None,
+        );
+
+        let mut content_y = cy + cfg.card.padding_y;
+
+        if cfg.card.show_avatar
+            && let Some(ref avatar) = self.cached_avatar
+        {
+            let av_size = cfg.card.avatar_size;
+            let av_x = (cx + (cw - av_size) / 2.0).round();
+            target.draw_pixmap(
+                av_x as i32,
+                content_y as i32,
+                avatar.as_ref(),
+                &PixmapPaint::default(),
+                Transform::identity(),
+                None,
+            );
+            content_y += av_size + 14.0;
+        }
+
+        let name = state.display_name.unwrap_or(state.username);
+        let (nw, _) = self.font.measure_text(name, 19.0);
+        let nx = (cx + (cw - nw) / 2.0).round();
+        let text_color = parse_color(&cfg.appearance.text_color, 1.0);
+        self.font
+            .draw_text(target, name, nx, content_y, 19.0, text_color);
+        content_y += 34.0;
+
+        self.draw_input_box(target, cfg, state, cx, content_y, cw);
+        content_y += cfg.input.height + 12.0;
+
+        self.draw_footer(target, cfg, state, cx, content_y, cw);
+    }
+
+    fn draw_input_box(
+        &self,
+        target: &mut PixmapMut,
+        cfg: &Config,
+        state: &CardUiState,
+        cx: f32,
+        cy: f32,
+        cw: f32,
+    ) {
+        let input_w = cw - (cfg.card.padding_x * 2.0);
+        let input_h = cfg.input.height;
+        let input_x = cx + cfg.card.padding_x;
+        let input_y = cy;
+
+        let rect = match Rect::from_xywh(input_x, input_y, input_w, input_h) {
+            Some(r) => r,
+            None => return,
+        };
+
+        let bg_color = parse_color(&cfg.input.background_color, cfg.input.opacity);
+        let mut bg_paint = Paint::default();
+        bg_paint.set_color(bg_color);
+        bg_paint.anti_alias = true;
+
+        let path = rounded_rect_path(rect, cfg.input.border_radius);
+        target.fill_path(
+            &path,
+            &bg_paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+
+        let border_color = if state.error {
+            parse_color(&cfg.appearance.error_color, 0.95)
+        } else {
+            parse_color(&cfg.input.border_color, cfg.input.border_opacity)
+        };
+        let mut border_paint = Paint::default();
+        border_paint.set_color(border_color);
+        border_paint.anti_alias = true;
+        let stroke = Stroke {
+            width: if state.error { 1.5 } else { 1.0 },
+            ..Default::default()
+        };
+        target.stroke_path(&path, &border_paint, &stroke, Transform::identity(), None);
+
+        let text_pad_x = 18.0;
+        let baseline_y = input_y + (input_h - 16.0) / 2.0 - 2.0;
+
+        if state.password_len == 0 {
+            let placeholder_color = parse_color(&cfg.appearance.muted_color, 0.55);
+            self.font.draw_text(
+                target,
+                &cfg.input.placeholder,
+                input_x + text_pad_x,
+                baseline_y,
+                14.0,
+                placeholder_color,
+            );
+        } else {
+            let dot_color = parse_color(&cfg.appearance.text_color, 0.95);
+            let mut dot_x = input_x + text_pad_x;
+            for _ in 0..state.password_len {
+                self.font.draw_text(
+                    target,
+                    &cfg.input.dot_char,
+                    dot_x,
+                    baseline_y + 1.0,
+                    16.0,
+                    dot_color,
+                );
+                let (dw, _) = self.font.measure_text(&cfg.input.dot_char, 16.0);
+                dot_x += dw + cfg.input.dot_spacing;
+            }
+        }
+
+        if cfg.input.cursor_glide.enabled {
+            self.draw_cursor_glide(target, cfg, state, input_x + text_pad_x, input_y, input_h);
+        }
+    }
+
+    fn draw_cursor_glide(
+        &self,
+        target: &mut PixmapMut,
+        cfg: &Config,
+        state: &CardUiState,
+        base_x: f32,
+        input_y: f32,
+        input_h: f32,
+    ) {
+        let cursor_h = input_h * 0.44;
+        let cursor_y = input_y + (input_h - cursor_h) / 2.0;
+
+        let glide_x = base_x + state.glide.current_x;
+        let trail_x = base_x + state.glide.trail_x;
+
+        let cursor_color = parse_color(&cfg.input.cursor_glide.color, 0.95);
+
+        if (glide_x - trail_x).abs() > 1.0 && cfg.input.cursor_glide.trail_smear > 0.01 {
+            let left = glide_x.min(trail_x);
+            let right = glide_x.max(trail_x) + cfg.input.cursor_glide.width;
+            let smear_w = (right - left).max(cfg.input.cursor_glide.width);
+            if let Some(smear_rect) = Rect::from_xywh(left, cursor_y, smear_w, cursor_h) {
+                let smear_color = parse_color(
+                    &cfg.input.cursor_glide.color,
+                    0.35 * cfg.input.cursor_glide.trail_smear,
+                );
+                let mut smear_paint = Paint::default();
+                smear_paint.set_color(smear_color);
+                let smear_path =
+                    rounded_rect_path(smear_rect, cfg.input.cursor_glide.corner_radius);
+                target.fill_path(
+                    &smear_path,
+                    &smear_paint,
+                    FillRule::Winding,
+                    Transform::identity(),
+                    None,
+                );
+            }
+        }
+
+        if let Some(cursor_rect) =
+            Rect::from_xywh(glide_x, cursor_y, cfg.input.cursor_glide.width, cursor_h)
+        {
+            let mut cursor_paint = Paint::default();
+            cursor_paint.set_color(cursor_color);
+            let cursor_path = rounded_rect_path(cursor_rect, cfg.input.cursor_glide.corner_radius);
+            target.fill_path(
+                &cursor_path,
+                &cursor_paint,
+                FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
+        }
+    }
+
+    fn draw_footer(
+        &self,
+        target: &mut PixmapMut,
+        cfg: &Config,
+        state: &CardUiState,
+        cx: f32,
+        cy: f32,
+        cw: f32,
+    ) {
+        let layout_str = state.layout.to_uppercase();
+        let (lw, _) = self.font.measure_text(&layout_str, 12.0);
+        let layout_color = parse_color(&cfg.appearance.accent_color, 0.85);
+
+        if state.capslock && cfg.keyboard.show_capslock_warning {
+            let caps_text = "CAPS LOCK";
+            let (cw_len, _) = self.font.measure_text(caps_text, 11.0);
+            let pill_w = cw_len + 16.0;
+            let pill_h = 22.0;
+            let pill_x = cx + (cw - pill_w) / 2.0;
+            let pill_y = cy;
+
+            if let Some(pill_rect) = Rect::from_xywh(pill_x, pill_y, pill_w, pill_h) {
+                let pill_bg = parse_color(&cfg.appearance.error_color, 0.22);
+                let mut pill_paint = Paint::default();
+                pill_paint.set_color(pill_bg);
+                let path = rounded_rect_path(pill_rect, 11.0);
+                target.fill_path(
+                    &path,
+                    &pill_paint,
+                    FillRule::Winding,
+                    Transform::identity(),
+                    None,
+                );
+
+                let caps_color = parse_color(&cfg.appearance.error_color, 0.95);
+                self.font.draw_text(
+                    target,
+                    caps_text,
+                    pill_x + 8.0,
+                    pill_y + 4.0,
+                    11.0,
+                    caps_color,
+                );
+            }
+
+            let lx = cx + cw - cfg.card.padding_x - lw;
+            self.font
+                .draw_text(target, &layout_str, lx, cy + 4.0, 12.0, layout_color);
+        } else if cfg.keyboard.show_layout {
+            let lx = cx + (cw - lw) / 2.0;
+            self.font
+                .draw_text(target, &layout_str, lx, cy + 2.0, 12.0, layout_color);
+        }
+    }
+
+    pub fn compute_dot_x_offset(&self, cfg: &Config, password_len: usize) -> f32 {
+        if password_len == 0 {
+            return 0.0;
+        }
+        let (dw, _) = self.font.measure_text(&cfg.input.dot_char, 16.0);
+        let step = dw + cfg.input.dot_spacing;
+        step * password_len as f32
+    }
+}
+
+fn rounded_rect_path(rect: Rect, radius: f32) -> tiny_skia::Path {
+    let mut pb = PathBuilder::new();
+    let r = radius.min(rect.width() / 2.0).min(rect.height() / 2.0);
+
+    let x = rect.x();
+    let y = rect.y();
+    let w = rect.width();
+    let h = rect.height();
+
+    pb.move_to(x + r, y);
+    pb.line_to(x + w - r, y);
+    pb.quad_to(x + w, y, x + w, y + r);
+    pb.line_to(x + w, y + h - r);
+    pb.quad_to(x + w, y + h, x + w - r, y + h);
+    pb.line_to(x + r, y + h);
+    pb.quad_to(x, y + h, x, y + h - r);
+    pb.line_to(x, y + r);
+    pb.quad_to(x, y, x + r, y);
+    pb.close();
+
+    pb.finish().unwrap()
+}
+
+fn chrono_free_time() -> (String, String) {
+    let now = std::time::SystemTime::now();
+    let duration = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = duration.as_secs();
+
+    let tz_offset = 3 * 3600;
+    let local_secs = (secs as i64 + tz_offset).rem_euclid(86400);
+
+    let hours = local_secs / 3600;
+    let minutes = (local_secs % 3600) / 60;
+
+    let time_str = format!("{:02}:{:02}", hours, minutes);
+
+    let days_since_epoch = (secs as i64 + tz_offset) / 86400;
+    let day_of_week = match (days_since_epoch + 4) % 7 {
+        0 => "Sunday",
+        1 => "Monday",
+        2 => "Tuesday",
+        3 => "Wednesday",
+        4 => "Thursday",
+        5 => "Friday",
+        _ => "Saturday",
+    };
+
+    let date_str = format!("{}, CachyOS", day_of_week);
+    (time_str, date_str)
+}
