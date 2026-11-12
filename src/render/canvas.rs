@@ -8,6 +8,7 @@ use tiny_skia::{
     PixmapPaint, Point, Rect, SpreadMode, Stroke, Transform,
 };
 
+#[derive(Debug, Clone)]
 pub struct CardUiState<'a> {
     pub display_name: &'a str,
     pub password_len: usize,
@@ -50,6 +51,27 @@ impl UiRenderer {
         self.cached_avatar = Some(pixmap);
     }
 
+    pub fn warm_cache(&mut self, cfg: &Config, target_w: u32, target_h: u32) {
+        if target_w == 0 || target_h == 0 {
+            return;
+        }
+        let key = (target_w, target_h);
+        if self.cached_wallpapers.contains_key(&key) {
+            return;
+        }
+        if let Some(ref wall_img) = self.source_wallpaper {
+            if let Ok(pix) = crate::render::image::render_wallpaper(
+                wall_img,
+                target_w,
+                target_h,
+                cfg.wallpaper.blur_sigma,
+                cfg.appearance.backdrop_dim,
+            ) {
+                self.cached_wallpapers.insert(key, pix);
+            }
+        }
+    }
+
     pub fn render_frame(
         &mut self,
         target: &mut PixmapMut,
@@ -62,27 +84,12 @@ impl UiRenderer {
         let target_w = target.width();
         let target_h = target.height();
 
-        // Direct memcpy avoids software alpha-blending across large surfaces.
-        if let Some(ref wall_img) = self.source_wallpaper {
-            let key = (target_w, target_h);
-            if !self.cached_wallpapers.contains_key(&key)
-                && let Ok(pix) = crate::render::image::render_wallpaper(
-                    wall_img,
-                    target_w,
-                    target_h,
-                    cfg.wallpaper.blur_sigma,
-                    cfg.appearance.backdrop_dim,
-                )
-            {
-                self.cached_wallpapers.insert(key, pix);
-            }
-            if let Some(wall) = self.cached_wallpapers.get(&key) {
-                if wall.width() == target_w && wall.height() == target_h {
-                    target.data_mut().copy_from_slice(wall.data());
-                } else {
-                    let solid = parse_color(&cfg.wallpaper.solid_color, 1.0);
-                    target.fill(solid);
-                }
+        self.warm_cache(cfg, target_w, target_h);
+
+        let key = (target_w, target_h);
+        if let Some(wall) = self.cached_wallpapers.get(&key) {
+            if wall.width() == target_w && wall.height() == target_h {
+                target.data_mut().copy_from_slice(wall.data());
             } else {
                 let solid = parse_color(&cfg.wallpaper.solid_color, 1.0);
                 target.fill(solid);
@@ -995,5 +1002,17 @@ mod tests {
 
         renderer.render_frame(&mut pm, &cfg, &state, true);
         assert!(pixmap.data().iter().any(|&b| b != 0));
+
+        // When fade_opacity is 0.0, output should be fully black.
+        let mut black_pixmap = Pixmap::new(320, 240).unwrap();
+        let mut black_pm = black_pixmap.as_mut();
+        let mut black_state = state.clone();
+        black_state.fade_opacity = 0.0;
+        renderer.render_frame(&mut black_pm, &cfg, &black_state, false);
+        for chunk in black_pixmap.data().as_chunks::<4>().0 {
+            assert_eq!(chunk[0], 0);
+            assert_eq!(chunk[1], 0);
+            assert_eq!(chunk[2], 0);
+        }
     }
 }

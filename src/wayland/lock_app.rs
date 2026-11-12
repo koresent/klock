@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState, FrameCallbackData},
+    compositor::{CompositorHandler, CompositorState},
     output::{OutputHandler, OutputState},
     reexports::calloop::{
         LoopHandle,
@@ -55,15 +55,13 @@ pub struct SurfaceView {
     pub width: u32,
     pub height: u32,
     pub is_primary: bool,
-    pub has_drawn: bool,
-    pub frame_pending: bool,
-    pub needs_redraw: bool,
+    pub has_drawn_visible: bool,
     pub pool: SlotPool,
 }
 
 pub struct LockApp {
     pub conn: Connection,
-    pub qh: QueueHandle<Self>,
+    pub _qh: QueueHandle<Self>,
     pub loop_handle: LoopHandle<'static, Self>,
     pub registry_state: RegistryState,
     pub compositor_state: CompositorState,
@@ -162,7 +160,7 @@ impl LockApp {
 
         Ok(Self {
             conn,
-            qh: qh.clone(),
+            _qh: qh.clone(),
             loop_handle,
             registry_state,
             compositor_state,
@@ -220,9 +218,7 @@ impl LockApp {
                     width: 960,
                     height: 540,
                     is_primary: true,
-                    has_drawn: false,
-                    frame_pending: false,
-                    needs_redraw: false,
+                    has_drawn_visible: false,
                     pool,
                 },
             );
@@ -235,6 +231,21 @@ impl LockApp {
 
             let outputs: Vec<wl_output::WlOutput> = self.output_state.outputs().collect();
             for output in outputs {
+                if let Some(info) = self.output_state.info(&output) {
+                    if let Some((w, h)) = info.logical_size {
+                        if w > 0 && h > 0 {
+                            self.ui.warm_cache(&self.cfg, w as u32, h as u32);
+                        }
+                    } else if let Some(mode) = info.modes.iter().find(|m| m.current) {
+                        if mode.dimensions.0 > 0 && mode.dimensions.1 > 0 {
+                            self.ui.warm_cache(
+                                &self.cfg,
+                                mode.dimensions.0 as u32,
+                                mode.dimensions.1 as u32,
+                            );
+                        }
+                    }
+                }
                 self.create_lock_surface_for_output(&output, qh)?;
             }
         }
@@ -277,9 +288,7 @@ impl LockApp {
                 width: 1920,
                 height: 1080,
                 is_primary: false,
-                has_drawn: false,
-                frame_pending: false,
-                needs_redraw: false,
+                has_drawn_visible: false,
                 pool,
             },
         );
@@ -343,8 +352,7 @@ impl LockApp {
             let should_be_primary = Some(*id) == chosen_id;
             if view.is_primary != should_be_primary {
                 view.is_primary = should_be_primary;
-                view.has_drawn = false;
-                view.needs_redraw = true;
+                view.has_drawn_visible = false;
             }
         }
     }
@@ -396,17 +404,12 @@ impl LockApp {
         let fading = self.fade.phase != FadePhase::Visible;
         let surface_ids: Vec<u32> = self
             .surfaces
-            .iter_mut()
+            .iter()
             .filter_map(|(id, v)| {
-                if !fading && !v.is_primary && v.has_drawn {
+                if !fading && !v.is_primary && v.has_drawn_visible {
                     return None;
                 }
-                if v.frame_pending {
-                    v.needs_redraw = true;
-                    None
-                } else {
-                    Some(*id)
-                }
+                Some(*id)
             })
             .collect();
         for id in surface_ids {
@@ -434,12 +437,18 @@ impl LockApp {
                 .create_buffer(w as i32, h as i32, stride, wl_shm::Format::Abgr8888)
             {
                 Ok(b) => b,
-                Err(_) => return,
+                Err(e) => {
+                    tracing::error!("create_buffer failed for {}x{}: {:?}", w, h, e);
+                    return;
+                }
             };
 
         let mut pixmap = match PixmapMut::from_bytes(canvas, w, h) {
             Some(p) => p,
-            None => return,
+            None => {
+                tracing::error!("PixmapMut::from_bytes failed for {}x{}", w, h);
+                return;
+            }
         };
 
         let char_count = self.password.chars().count();
@@ -461,14 +470,16 @@ impl LockApp {
         self.ui
             .render_frame(&mut pixmap, &self.cfg, &state, view.is_primary);
 
-        view.surface
-            .frame(&self.qh, FrameCallbackData(view.surface.clone()));
         view.surface.attach(Some(buffer.wl_buffer()), 0, 0);
         view.surface.damage_buffer(0, 0, w as i32, h as i32);
         view.surface.commit();
-        view.has_drawn = true;
-        view.frame_pending = true;
-        view.needs_redraw = false;
+        let _ = self.conn.flush();
+
+        if state.fade_opacity >= 0.999 || self.fade.phase == FadePhase::Visible {
+            view.has_drawn_visible = true;
+        } else {
+            view.has_drawn_visible = false;
+        }
     }
 
     pub fn unlock_and_exit(&mut self) {
@@ -571,10 +582,10 @@ impl SessionLockHandler for LockApp {
         {
             view.width = w;
             view.height = h;
-            view.has_drawn = false;
+            view.has_drawn_visible = false;
         }
+        self.ui.warm_cache(&self.cfg, w, h);
         self.update_primary_surface();
-        self.fade.start_fade_in();
         self.redraw_surface(id);
     }
 }
@@ -599,9 +610,10 @@ impl WindowHandler for LockApp {
             if view.window.is_some() && (view.width != new_w || view.height != new_h) {
                 view.width = new_w;
                 view.height = new_h;
-                view.has_drawn = false;
+                view.has_drawn_visible = false;
             }
         }
+        self.ui.warm_cache(&self.cfg, new_w, new_h);
         self.update_primary_surface();
         self.fade.start_fade_in();
         self.redraw_all();
@@ -901,19 +913,9 @@ impl CompositorHandler for LockApp {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        surface: &wl_surface::WlSurface,
+        _surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
-        let id = surface.id().protocol_id();
-        let should_redraw = if let Some(view) = self.surfaces.get_mut(&id) {
-            view.frame_pending = false;
-            view.needs_redraw
-        } else {
-            false
-        };
-        if should_redraw {
-            self.redraw_surface(id);
-        }
     }
 
     fn surface_enter(

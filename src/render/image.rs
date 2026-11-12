@@ -122,3 +122,20 @@ pub fn render_circular_avatar(
 
     Ok(pixmap)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_render_wallpaper_dimensions() {
+        let img = DynamicImage::new_rgb8(100, 100);
+        let res_land = render_wallpaper(&img, 1920, 1080, 0.0, 0.0).unwrap();
+        assert_eq!(res_land.width(), 1920);
+        assert_eq!(res_land.height(), 1080);
+
+        let res_port = render_wallpaper(&img, 1440, 3440, 0.0, 0.0).unwrap();
+        assert_eq!(res_port.width(), 1440);
+        assert_eq!(res_port.height(), 3440);
+    }
+}
