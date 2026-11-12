@@ -218,24 +218,11 @@ impl UiRenderer {
         let cx = card_rect.x();
         let cy = card_rect.y();
         let cw = card_rect.width();
-        let ch = card_rect.height();
 
         let card_bg = parse_color(&cfg.card.background_color, cfg.card.opacity);
         let mut bg_paint = Paint::default();
         bg_paint.set_color(card_bg);
         bg_paint.anti_alias = true;
-
-        let shadow_rect = Rect::from_xywh(cx - 2.0, cy + 4.0, cw + 4.0, ch + 8.0).unwrap();
-        let shadow_path = rounded_rect_path(shadow_rect, cfg.card.border_radius + 2.0);
-        let mut shadow_paint = Paint::default();
-        shadow_paint.set_color(Color::from_rgba(0.0, 0.0, 0.0, 0.28).unwrap());
-        target.fill_path(
-            &shadow_path,
-            &shadow_paint,
-            FillRule::Winding,
-            Transform::identity(),
-            None,
-        );
 
         let card_path = rounded_rect_path(card_rect, cfg.card.border_radius);
         target.fill_path(
