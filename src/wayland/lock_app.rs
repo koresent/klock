@@ -47,6 +47,7 @@ use crate::render::{
 
 pub struct SurfaceView {
     pub surface: wl_surface::WlSurface,
+    pub output: Option<wl_output::WlOutput>,
     pub _lock_surface: Option<SessionLockSurface>,
     pub window: Option<Window>,
     pub width: u32,
@@ -196,6 +197,7 @@ impl LockApp {
                 id,
                 SurfaceView {
                     surface,
+                    output: None,
                     _lock_surface: None,
                     window: Some(window),
                     width: 960,
@@ -226,6 +228,14 @@ impl LockApp {
         output: &wl_output::WlOutput,
         qh: &QueueHandle<Self>,
     ) -> Result<()> {
+        if self
+            .surfaces
+            .values()
+            .any(|v| v.output.as_ref() == Some(output))
+        {
+            return Ok(());
+        }
+
         let lock = match self.session_lock.as_ref() {
             Some(l) => l,
             None => return Ok(()),
@@ -244,6 +254,7 @@ impl LockApp {
             id,
             SurfaceView {
                 surface,
+                output: Some(output.clone()),
                 _lock_surface: Some(lock_surface),
                 window: None,
                 width: 1920,
@@ -763,8 +774,9 @@ impl OutputHandler for LockApp {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
+        output: wl_output::WlOutput,
     ) {
+        self.surfaces.retain(|_, v| v.output.as_ref() != Some(&output));
     }
 }
 

@@ -16,6 +16,8 @@ pub struct Config {
     #[serde(default)]
     pub wallpaper: WallpaperConfig,
     #[serde(default)]
+    pub clock: ClockConfig,
+    #[serde(default)]
     pub keyboard: KeyboardConfig,
 }
 
@@ -341,6 +343,57 @@ fn default_fill_mode() -> String {
 }
 fn default_solid_color() -> String {
     "#1d2021".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClockConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_clock_position")]
+    pub position: String,
+    #[serde(default = "default_time_format")]
+    pub time_format: String,
+    #[serde(default = "default_date_format")]
+    pub date_format: String,
+    #[serde(default = "default_time_size")]
+    pub time_font_size: f32,
+    #[serde(default = "default_date_size")]
+    pub date_font_size: f32,
+    #[serde(default)]
+    pub time_color: Option<String>,
+    #[serde(default)]
+    pub date_color: Option<String>,
+}
+
+impl Default for ClockConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            position: default_clock_position(),
+            time_format: default_time_format(),
+            date_format: default_date_format(),
+            time_font_size: default_time_size(),
+            date_font_size: default_date_size(),
+            time_color: None,
+            date_color: None,
+        }
+    }
+}
+
+fn default_clock_position() -> String {
+    "top-center".to_string()
+}
+fn default_time_format() -> String {
+    "%H:%M".to_string()
+}
+fn default_date_format() -> String {
+    "%A, CachyOS".to_string()
+}
+fn default_time_size() -> f32 {
+    54.0
+}
+fn default_date_size() -> f32 {
+    18.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

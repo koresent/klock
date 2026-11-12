@@ -41,6 +41,51 @@ impl FontRenderer {
         (width, max_height)
     }
 
+    pub fn measure_text_bold(&self, text: &str, px_size: f32) -> (f32, f32) {
+        let (width, max_height) = self.measure_text(text, px_size);
+        let char_count = text.chars().count();
+        (width + (char_count as f32 * 0.65), max_height)
+    }
+
+    pub fn draw_text_bold(
+        &self,
+        pixmap: &mut PixmapMut,
+        text: &str,
+        mut x: f32,
+        y: f32,
+        px_size: f32,
+        color: Color,
+    ) {
+        for ch in text.chars() {
+            let (metrics, bitmap) = self.font.rasterize(ch, px_size);
+            let gx = x + metrics.xmin as f32;
+            let gy = y + px_size - metrics.ymin as f32 - metrics.height as f32;
+
+            self.blend_glyph(
+                pixmap,
+                &bitmap,
+                (metrics.width, metrics.height),
+                (gx, gy),
+                color,
+            );
+            self.blend_glyph(
+                pixmap,
+                &bitmap,
+                (metrics.width, metrics.height),
+                (gx + 0.65, gy),
+                color,
+            );
+            self.blend_glyph(
+                pixmap,
+                &bitmap,
+                (metrics.width, metrics.height),
+                (gx + 0.35, gy + 0.35),
+                color,
+            );
+            x += metrics.advance_width + 0.65;
+        }
+    }
+
     pub fn draw_text(
         &self,
         pixmap: &mut PixmapMut,

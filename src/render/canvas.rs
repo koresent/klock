@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::config::{Config, parse_color};
 use crate::render::animations::{CursorGlideState, ShakeAnimation};
 use crate::render::text::FontRenderer;
@@ -20,8 +22,7 @@ pub struct CardUiState<'a> {
 pub struct UiRenderer {
     font: FontRenderer,
     source_wallpaper: Option<image::DynamicImage>,
-    cached_wallpaper: Option<Pixmap>,
-    cached_size: (u32, u32),
+    cached_wallpapers: HashMap<(u32, u32), Pixmap>,
     cached_avatar: Option<Pixmap>,
 }
 
@@ -31,16 +32,14 @@ impl UiRenderer {
         Ok(Self {
             font,
             source_wallpaper: None,
-            cached_wallpaper: None,
-            cached_size: (0, 0),
+            cached_wallpapers: HashMap::new(),
             cached_avatar: None,
         })
     }
 
     pub fn set_source_wallpaper(&mut self, img: image::DynamicImage) {
         self.source_wallpaper = Some(img);
-        self.cached_wallpaper = None;
-        self.cached_size = (0, 0);
+        self.cached_wallpapers.clear();
     }
 
     pub fn set_avatar(&mut self, pixmap: Pixmap) {
@@ -63,9 +62,10 @@ impl UiRenderer {
         let solid = parse_color(&cfg.wallpaper.solid_color, 1.0);
         target.fill(solid);
 
-        // 2. Render and cache wallpaper dynamically scaled to exact target resolution
+        // 2. Render and cache wallpaper per resolution (avoids re-rendering in multi-monitor setups)
         if let Some(ref wall_img) = self.source_wallpaper {
-            if (self.cached_wallpaper.is_none() || self.cached_size != (target_w, target_h))
+            let key = (target_w, target_h);
+            if !self.cached_wallpapers.contains_key(&key)
                 && let Ok(pix) = crate::render::image::render_wallpaper(
                     wall_img,
                     target_w,
@@ -74,10 +74,9 @@ impl UiRenderer {
                     cfg.appearance.backdrop_dim,
                 )
             {
-                self.cached_wallpaper = Some(pix);
-                self.cached_size = (target_w, target_h);
+                self.cached_wallpapers.insert(key, pix);
             }
-            if let Some(ref wall) = self.cached_wallpaper {
+            if let Some(wall) = self.cached_wallpapers.get(&key) {
                 target.draw_pixmap(
                     0,
                     0,
@@ -93,7 +92,9 @@ impl UiRenderer {
             return;
         }
 
-        self.draw_clock(target, cfg, screen_w, screen_h);
+        if cfg.clock.enabled {
+            self.draw_clock(target, cfg, screen_w, screen_h);
+        }
 
         let shake_x = state.shake.offset_x();
         let card_w = cfg.card.width;
@@ -110,20 +111,60 @@ impl UiRenderer {
         let now = chrono_free_time();
         let (time_str, date_str) = now;
 
-        let time_color = parse_color(&cfg.appearance.text_color, 0.92);
-        let date_color = parse_color(&cfg.appearance.muted_color, 0.85);
+        let time_font_size = cfg.clock.time_font_size.max(12.0);
+        let date_font_size = cfg.clock.date_font_size.max(10.0);
 
-        let (tw, th) = self.font.measure_text(&time_str, 54.0);
-        let tx = (screen_w - tw) / 2.0;
-        let ty = (screen_h * 0.18).round();
-        self.font
-            .draw_text(target, &time_str, tx, ty, 54.0, time_color);
+        let time_color = if let Some(ref c) = cfg.clock.time_color {
+            parse_color(c, 1.0)
+        } else {
+            parse_color(&cfg.appearance.text_color, 0.92)
+        };
 
-        let (dw, _) = self.font.measure_text(&date_str, 18.0);
-        let dx = (screen_w - dw) / 2.0;
-        let dy = ty + th + 18.0;
+        let date_color = if let Some(ref c) = cfg.clock.date_color {
+            parse_color(c, 1.0)
+        } else {
+            parse_color(&cfg.appearance.muted_color, 0.85)
+        };
+
+        let (tw, th) = self.font.measure_text(&time_str, time_font_size);
+        let (dw, _) = self.font.measure_text(&date_str, date_font_size);
+
+        let (tx, ty, dx, dy) = match cfg.clock.position.as_str() {
+            "top-left" => {
+                let x = 48.0;
+                let y = 48.0;
+                (x, y, x, y + th + 14.0)
+            }
+            "top-right" => {
+                let tx = screen_w - tw - 48.0;
+                let dx = screen_w - dw - 48.0;
+                let y = 48.0;
+                (tx, y, dx, y + th + 14.0)
+            }
+            "center" => {
+                let card_h = compute_card_height(cfg, false);
+                let center_y = (screen_h - card_h) / 2.0;
+                let total_clock_h = th + 18.0 + date_font_size;
+                let ty = (center_y - total_clock_h - 32.0).max(32.0);
+                let tx = (screen_w - tw) / 2.0;
+                let dx = (screen_w - dw) / 2.0;
+                let dy = ty + th + 14.0;
+                (tx, ty, dx, dy)
+            }
+            _ => {
+                // "top-center" (default)
+                let tx = (screen_w - tw) / 2.0;
+                let ty = (screen_h * 0.18).round();
+                let dx = (screen_w - dw) / 2.0;
+                let dy = ty + th + 18.0;
+                (tx, ty, dx, dy)
+            }
+        };
+
         self.font
-            .draw_text(target, &date_str, dx, dy, 18.0, date_color);
+            .draw_text(target, &time_str, tx, ty, time_font_size, time_color);
+        self.font
+            .draw_text(target, &date_str, dx, dy, date_font_size, date_color);
     }
 
     fn draw_card(
@@ -230,11 +271,11 @@ impl UiRenderer {
         }
 
         let name = state.display_name;
-        let (nw, _) = self.font.measure_text(name, 19.0);
+        let (nw, _) = self.font.measure_text_bold(name, 19.0);
         let nx = (cx + (cw - nw) / 2.0).round();
         let text_color = parse_color(&cfg.appearance.text_color, 1.0);
         self.font
-            .draw_text(target, name, nx, content_y, 19.0, text_color);
+            .draw_text_bold(target, name, nx, content_y, 19.0, text_color);
         content_y += 34.0;
 
         let (input_rect, peek_rect, submit_rect) =
@@ -351,16 +392,19 @@ impl UiRenderer {
             None,
         );
 
+        // Matching kgreet: input has accent_color (#b8bb26) border when focused
         let border_color = if state.error {
             parse_color(&cfg.appearance.error_color, 0.95)
+        } else if let Some(ref c) = cfg.input.focus_border_color {
+            parse_color(c, 1.0)
         } else {
-            parse_color(&cfg.input.border_color, cfg.input.border_opacity)
+            parse_color(&cfg.appearance.accent_color, 1.0)
         };
         let mut border_paint = Paint::default();
         border_paint.set_color(border_color);
         border_paint.anti_alias = true;
         let stroke = Stroke {
-            width: if state.error { 1.5 } else { 1.0 },
+            width: if state.error { 2.0 } else { 1.5 },
             ..Default::default()
         };
         target.stroke_path(&path, &border_paint, &stroke, Transform::identity(), None);
@@ -369,11 +413,12 @@ impl UiRenderer {
         let baseline_y = input_y + (input_h - 16.0) / 2.0 - 2.0;
 
         if state.password_len == 0 {
-            let placeholder_color = parse_color(&cfg.appearance.muted_color, 0.55);
+            // Matching kgreet: opacity 0.88 with padding-left: 6-8px so cursor does not overlap "Enter"
+            let placeholder_color = parse_color(&cfg.appearance.muted_color, 0.88);
             self.font.draw_text(
                 target,
                 &cfg.input.placeholder,
-                input_x + text_pad_x,
+                input_x + text_pad_x + 8.0,
                 baseline_y,
                 14.0,
                 placeholder_color,
@@ -413,11 +458,11 @@ impl UiRenderer {
             let peek_color = if state.reveal_password {
                 parse_color(&cfg.appearance.accent_color, 0.95)
             } else if state.password_len > 0 {
-                parse_color(&cfg.appearance.muted_color, 0.75)
+                parse_color(&cfg.appearance.muted_color, 0.85)
             } else {
-                parse_color(&cfg.appearance.muted_color, 0.35)
+                parse_color(&cfg.appearance.muted_color, 0.50)
             };
-            draw_eye_icon(target, peek_rect, state.reveal_password, peek_color);
+            draw_adwaita_eye_icon(target, peek_rect, state.reveal_password, peek_color);
         }
     }
 
@@ -524,61 +569,146 @@ pub fn compute_input_row_geometry(
     let submit_rect =
         Rect::from_xywh(row_x + input_w + gap, content_y, btn_size, btn_size).unwrap();
 
-    let peek_size = 24.0;
-    let peek_x = input_rect.x() + input_rect.width() - peek_size - 10.0;
+    let peek_size = 20.0;
+    let peek_x = input_rect.x() + input_rect.width() - peek_size - 11.0;
     let peek_y = input_rect.y() + (input_rect.height() - peek_size) / 2.0;
     let peek_rect = Rect::from_xywh(peek_x, peek_y, peek_size, peek_size).unwrap();
 
     (input_rect, peek_rect, submit_rect)
 }
 
-fn draw_eye_icon(target: &mut PixmapMut, rect: Rect, revealed: bool, color: Color) {
-    let cx = rect.x() + rect.width() / 2.0;
-    let cy = rect.y() + rect.height() / 2.0;
+fn draw_adwaita_eye_icon(target: &mut PixmapMut, rect: Rect, revealed: bool, color: Color) {
+    let s = (rect.width() / 16.0).min(rect.height() / 16.0);
+    let sx = rect.x() + (rect.width() - 16.0 * s) / 2.0;
+    let sy = rect.y() + (rect.height() - 16.0 * s) / 2.0;
 
     let mut pb = PathBuilder::new();
-    pb.move_to(cx - 7.5, cy);
-    pb.quad_to(cx, cy - 5.5, cx + 7.5, cy);
-    pb.quad_to(cx, cy + 5.5, cx - 7.5, cy);
+
+    // 1. Outer eye contour
+    pb.move_to(sx + 8.0 * s, sy + 2.0 * s);
+    pb.cubic_to(
+        sx + 4.3515 * s,
+        sy + 2.0039 * s,
+        sx + 1.1680 * s,
+        sy + 4.4766 * s,
+        sx + 0.2617 * s,
+        sy + 8.0078 * s,
+    );
+    pb.cubic_to(
+        sx + 1.1758 * s,
+        sy + 11.5351 * s,
+        sx + 4.3594 * s,
+        sy + 13.9961 * s,
+        sx + 8.0 * s,
+        sy + 14.0 * s,
+    );
+    pb.cubic_to(
+        sx + 11.6484 * s,
+        sy + 13.9961 * s,
+        sx + 14.8320 * s,
+        sy + 11.5351 * s,
+        sx + 15.7383 * s,
+        sy + 8.0078 * s,
+    );
+    pb.cubic_to(
+        sx + 14.8242 * s,
+        sy + 4.4648 * s,
+        sx + 11.6406 * s,
+        sy + 2.0039 * s,
+        sx + 8.0 * s,
+        sy + 2.0 * s,
+    );
+    pb.close();
+
+    // 2. Middle cutout circle (r=4 at 8,8)
+    pb.move_to(sx + 8.0 * s, sy + 4.0 * s);
+    pb.cubic_to(
+        sx + 10.2109 * s,
+        sy + 4.0 * s,
+        sx + 12.0 * s,
+        sy + 5.7891 * s,
+        sx + 12.0 * s,
+        sy + 8.0 * s,
+    );
+    pb.cubic_to(
+        sx + 12.0 * s,
+        sy + 10.2109 * s,
+        sx + 10.2109 * s,
+        sy + 12.0 * s,
+        sx + 8.0 * s,
+        sy + 12.0 * s,
+    );
+    pb.cubic_to(
+        sx + 5.7891 * s,
+        sy + 12.0 * s,
+        sx + 4.0 * s,
+        sy + 10.2109 * s,
+        sx + 4.0 * s,
+        sy + 8.0 * s,
+    );
+    pb.cubic_to(
+        sx + 4.0 * s,
+        sy + 5.7891 * s,
+        sx + 5.7891 * s,
+        sy + 4.0 * s,
+        sx + 8.0 * s,
+        sy + 4.0 * s,
+    );
+    pb.close();
+
+    // 3. Inner pupil circle (r=2 at 8,8)
+    pb.move_to(sx + 8.0 * s, sy + 6.0 * s);
+    pb.cubic_to(
+        sx + 6.8945 * s,
+        sy + 6.0 * s,
+        sx + 6.0 * s,
+        sy + 6.8945 * s,
+        sx + 6.0 * s,
+        sy + 8.0 * s,
+    );
+    pb.cubic_to(
+        sx + 6.0 * s,
+        sy + 9.1055 * s,
+        sx + 6.8945 * s,
+        sy + 10.0 * s,
+        sx + 8.0 * s,
+        sy + 10.0 * s,
+    );
+    pb.cubic_to(
+        sx + 9.1055 * s,
+        sy + 10.0 * s,
+        sx + 10.0 * s,
+        sy + 9.1055 * s,
+        sx + 10.0 * s,
+        sy + 8.0 * s,
+    );
+    pb.cubic_to(
+        sx + 10.0 * s,
+        sy + 6.8945 * s,
+        sx + 9.1055 * s,
+        sy + 6.0 * s,
+        sx + 8.0 * s,
+        sy + 6.0 * s,
+    );
     pb.close();
 
     if let Some(path) = pb.finish() {
         let mut paint = Paint::default();
         paint.set_color(color);
         paint.anti_alias = true;
-        let stroke = Stroke {
-            width: 1.5,
-            line_cap: LineCap::Round,
-            ..Default::default()
-        };
-        target.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
-    }
-
-    let mut pupil_pb = PathBuilder::new();
-    pupil_pb.push_circle(cx, cy, 2.4);
-    if let Some(pupil_path) = pupil_pb.finish() {
-        let mut paint = Paint::default();
-        paint.set_color(color);
-        paint.anti_alias = true;
-        target.fill_path(
-            &pupil_path,
-            &paint,
-            FillRule::Winding,
-            Transform::identity(),
-            None,
-        );
+        target.fill_path(&path, &paint, FillRule::EvenOdd, Transform::identity(), None);
     }
 
     if revealed {
         let mut slash_pb = PathBuilder::new();
-        slash_pb.move_to(cx - 6.5, cy - 6.5);
-        slash_pb.line_to(cx + 6.5, cy + 6.5);
+        slash_pb.move_to(sx + 1.5312 * s, sy + 0.4687 * s);
+        slash_pb.line_to(sx + 15.5312 * s, sy + 14.4687 * s);
         if let Some(slash_path) = slash_pb.finish() {
             let mut paint = Paint::default();
             paint.set_color(color);
             paint.anti_alias = true;
             let stroke = Stroke {
-                width: 1.6,
+                width: 1.8 * s,
                 line_cap: LineCap::Round,
                 ..Default::default()
             };

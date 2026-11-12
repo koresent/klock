@@ -12,6 +12,19 @@ user:
   # Explicit display name override; null reads AccountsService RealName or /etc/passwd GECOS.
   display_name: null
 
+clock:
+  enabled: true
+  # "top-center", "center", "top-left", "top-right"
+  position: "top-center"
+  time_format: "%H:%M"
+  date_format: "%A, CachyOS"
+  time_font_size: 54.0
+  date_font_size: 18.0
+  # null falls back to appearance.text_color
+  time_color: null
+  # null falls back to appearance.muted_color
+  date_color: null
+
 card:
   background_color: "#282828"
   opacity: 1.0
