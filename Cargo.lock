@@ -488,6 +488,7 @@ dependencies = [
  "fastblur",
  "fontdue",
  "image",
+ "libc",
  "pam-client",
  "serde",
  "serde_yaml",

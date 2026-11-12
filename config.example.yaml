@@ -16,14 +16,22 @@ clock:
   enabled: true
   # "top-center", "center", "top-left", "top-right"
   position: "top-center"
+  # Standard strftime formats
   time_format: "%H:%M"
-  date_format: "%A, CachyOS"
+  date_format: "%A, %d %B"
+  # Optional 3rd line below date: null disables it.
+  # Supports placeholders: {os}, {session}, {host}, {user} or any custom text.
+  subtitle: null
   time_font_size: 54.0
   date_font_size: 18.0
+  subtitle_font_size: 13.0
+  time_bold: false
   # null falls back to appearance.text_color
   time_color: null
   # null falls back to appearance.muted_color
   date_color: null
+  # null falls back to appearance.muted_color
+  subtitle_color: null
 
 card:
   background_color: "#282828"

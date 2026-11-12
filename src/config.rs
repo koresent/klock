@@ -355,14 +355,45 @@ pub struct ClockConfig {
     pub time_format: String,
     #[serde(default = "default_date_format")]
     pub date_format: String,
+    #[serde(default)]
+    pub subtitle: Option<String>,
     #[serde(default = "default_time_size")]
     pub time_font_size: f32,
     #[serde(default = "default_date_size")]
     pub date_font_size: f32,
+    #[serde(default = "default_subtitle_size")]
+    pub subtitle_font_size: f32,
     #[serde(default)]
     pub time_color: Option<String>,
     #[serde(default)]
     pub date_color: Option<String>,
+    #[serde(default)]
+    pub subtitle_color: Option<String>,
+    #[serde(default)]
+    pub time_bold: bool,
+}
+
+impl ClockConfig {
+    pub fn resolve_subtitle(&self, username: &str) -> Option<String> {
+        let raw = self.subtitle.as_deref()?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        let mut res = raw.to_string();
+        if res.contains("{os}") {
+            res = res.replace("{os}", &read_os_name());
+        }
+        if res.contains("{session}") {
+            res = res.replace("{session}", &read_session_name());
+        }
+        if res.contains("{host}") {
+            res = res.replace("{host}", &read_hostname());
+        }
+        if res.contains("{user}") {
+            res = res.replace("{user}", username);
+        }
+        Some(res)
+    }
 }
 
 impl Default for ClockConfig {
@@ -372,10 +403,14 @@ impl Default for ClockConfig {
             position: default_clock_position(),
             time_format: default_time_format(),
             date_format: default_date_format(),
+            subtitle: None,
             time_font_size: default_time_size(),
             date_font_size: default_date_size(),
+            subtitle_font_size: default_subtitle_size(),
             time_color: None,
             date_color: None,
+            subtitle_color: None,
+            time_bold: false,
         }
     }
 }
@@ -387,13 +422,53 @@ fn default_time_format() -> String {
     "%H:%M".to_string()
 }
 fn default_date_format() -> String {
-    "%A, CachyOS".to_string()
+    "%A, %d %B".to_string()
 }
 fn default_time_size() -> f32 {
     54.0
 }
 fn default_date_size() -> f32 {
     18.0
+}
+fn default_subtitle_size() -> f32 {
+    13.0
+}
+
+fn read_os_name() -> String {
+    if let Ok(content) = std::fs::read_to_string("/etc/os-release") {
+        for key in ["PRETTY_NAME=", "NAME="] {
+            for line in content.lines() {
+                if let Some(val) = line.strip_prefix(key) {
+                    let clean = val.trim().trim_matches('"').trim_matches('\'');
+                    if !clean.is_empty() {
+                        return clean.to_string();
+                    }
+                }
+            }
+        }
+    }
+    "Linux".to_string()
+}
+
+fn read_session_name() -> String {
+    for var in ["XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP", "DESKTOP_SESSION"] {
+        if let Ok(val) = std::env::var(var)
+            && !val.trim().is_empty()
+        {
+            return val.trim().to_string();
+        }
+    }
+    "Wayland".to_string()
+}
+
+fn read_hostname() -> String {
+    if let Ok(h) = std::fs::read_to_string("/etc/hostname") {
+        let trimmed = h.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    "localhost".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -110,11 +110,13 @@ impl UiRenderer {
     }
 
     fn draw_clock(&self, target: &mut PixmapMut, cfg: &Config, screen_w: f32, screen_h: f32) {
-        let now = chrono_free_time();
-        let (time_str, date_str) = now;
+        let time_str = format_local_time(&cfg.clock.time_format);
+        let date_str = format_local_time(&cfg.clock.date_format);
+        let subtitle_str = cfg.clock.resolve_subtitle(&cfg.user.default);
 
         let time_font_size = cfg.clock.time_font_size.max(12.0);
         let date_font_size = cfg.clock.date_font_size.max(10.0);
+        let sub_font_size = cfg.clock.subtitle_font_size.max(9.0);
 
         let time_color = if let Some(ref c) = cfg.clock.time_color {
             parse_color(c, 1.0)
@@ -128,45 +130,82 @@ impl UiRenderer {
             parse_color(&cfg.appearance.muted_color, 0.85)
         };
 
-        let (tw, th) = self.font.measure_text(&time_str, time_font_size);
-        let (dw, _) = self.font.measure_text(&date_str, date_font_size);
+        let sub_color = if let Some(ref c) = cfg.clock.subtitle_color {
+            parse_color(c, 1.0)
+        } else {
+            parse_color(&cfg.appearance.muted_color, 0.65)
+        };
 
-        let (tx, ty, dx, dy) = match cfg.clock.position.as_str() {
+        let (tw, th) = if cfg.clock.time_bold {
+            self.font.measure_text_bold(&time_str, time_font_size)
+        } else {
+            self.font.measure_text(&time_str, time_font_size)
+        };
+        let (dw, dh) = self.font.measure_text(&date_str, date_font_size);
+        let (sw, _) = subtitle_str
+            .as_deref()
+            .map(|s| self.font.measure_text(s, sub_font_size))
+            .unwrap_or((0.0, 0.0));
+
+        let (tx, ty, dx, dy, sx, sy) = match cfg.clock.position.as_str() {
             "top-left" => {
                 let x = 48.0;
                 let y = 48.0;
-                (x, y, x, y + th + 14.0)
+                let dy = y + th + 14.0;
+                let sy = dy + dh + 10.0;
+                (x, y, x, dy, x, sy)
             }
             "top-right" => {
                 let tx = screen_w - tw - 48.0;
                 let dx = screen_w - dw - 48.0;
+                let sx = screen_w - sw - 48.0;
                 let y = 48.0;
-                (tx, y, dx, y + th + 14.0)
+                let dy = y + th + 14.0;
+                let sy = dy + dh + 10.0;
+                (tx, y, dx, dy, sx, sy)
             }
             "center" => {
                 let card_h = compute_card_height(cfg, false);
                 let center_y = (screen_h - card_h) / 2.0;
-                let total_clock_h = th + 18.0 + date_font_size;
+                let extra_sub = if subtitle_str.is_some() {
+                    sub_font_size + 10.0
+                } else {
+                    0.0
+                };
+                let total_clock_h = th + 16.0 + date_font_size + extra_sub;
                 let ty = (center_y - total_clock_h - 32.0).max(32.0);
                 let tx = (screen_w - tw) / 2.0;
                 let dx = (screen_w - dw) / 2.0;
                 let dy = ty + th + 14.0;
-                (tx, ty, dx, dy)
+                let sx = (screen_w - sw) / 2.0;
+                let sy = dy + dh + 10.0;
+                (tx, ty, dx, dy, sx, sy)
             }
             _ => {
-                // "top-center" (default)
                 let tx = (screen_w - tw) / 2.0;
                 let ty = (screen_h * 0.18).round();
                 let dx = (screen_w - dw) / 2.0;
                 let dy = ty + th + 18.0;
-                (tx, ty, dx, dy)
+                let sx = (screen_w - sw) / 2.0;
+                let sy = dy + dh + 10.0;
+                (tx, ty, dx, dy, sx, sy)
             }
         };
 
-        self.font
-            .draw_text(target, &time_str, tx, ty, time_font_size, time_color);
+        if cfg.clock.time_bold {
+            self.font
+                .draw_text_bold(target, &time_str, tx, ty, time_font_size, time_color);
+        } else {
+            self.font
+                .draw_text(target, &time_str, tx, ty, time_font_size, time_color);
+        }
         self.font
             .draw_text(target, &date_str, dx, dy, date_font_size, date_color);
+
+        if let Some(ref sub) = subtitle_str {
+            self.font
+                .draw_text(target, sub, sx, sy, sub_font_size, sub_color);
+        }
     }
 
     fn draw_card(
@@ -827,32 +866,31 @@ fn rounded_rect_path(rect: Rect, radius: f32) -> tiny_skia::Path {
     pb.finish().unwrap()
 }
 
-fn chrono_free_time() -> (String, String) {
-    let now = std::time::SystemTime::now();
-    let duration = now
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = duration.as_secs();
-
-    let tz_offset = 3 * 3600;
-    let local_secs = (secs as i64 + tz_offset).rem_euclid(86400);
-
-    let hours = local_secs / 3600;
-    let minutes = (local_secs % 3600) / 60;
-
-    let time_str = format!("{:02}:{:02}", hours, minutes);
-
-    let days_since_epoch = (secs as i64 + tz_offset) / 86400;
-    let day_of_week = match (days_since_epoch + 4) % 7 {
-        0 => "Sunday",
-        1 => "Monday",
-        2 => "Tuesday",
-        3 => "Wednesday",
-        4 => "Thursday",
-        5 => "Friday",
-        _ => "Saturday",
+pub fn format_local_time(fmt: &str) -> String {
+    let mut t: libc::time_t = 0;
+    unsafe {
+        libc::time(&mut t);
+    }
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe {
+        if libc::localtime_r(&t, &mut tm).is_null() {
+            return String::new();
+        }
+    }
+    let Ok(c_fmt) = std::ffi::CString::new(fmt) else {
+        return String::new();
     };
-
-    let date_str = format!("{}, CachyOS", day_of_week);
-    (time_str, date_str)
+    let mut buf = [0u8; 128];
+    let len = unsafe {
+        libc::strftime(
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            c_fmt.as_ptr(),
+            &tm,
+        )
+    };
+    if len == 0 {
+        return String::new();
+    }
+    String::from_utf8_lossy(&buf[..len]).into_owned()
 }
