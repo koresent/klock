@@ -1,0 +1,77 @@
+# klock configuration file (YAML)
+# Discovery order (unless overridden with `-c / --config`):
+#   1. /etc/klock/config.yaml (or .yml)
+#   2. ~/.config/klock/config.yaml (or .yml)
+#   3. ~/.config/kgreet/config.yaml (or .yml)
+
+user:
+  # Username to unlock for; null picks current user or first login-capable user in /etc/passwd.
+  default: null
+  # Show display name (RealName / GECOS) instead of raw login in the header.
+  show_display_name: true
+  # Explicit display name override; null reads AccountsService RealName or /etc/passwd GECOS.
+  display_name: null
+
+card:
+  background_color: "#282828"
+  opacity: 1.0
+  border_color: "#928374"
+  border_opacity: 0.45
+  border_radius: 18
+  width: 410
+  padding_x: 26
+  padding_y: 24
+  show_avatar: true
+  avatar_size: 96
+  avatar_border_width: 2
+  # null falls back to appearance.accent_color.
+  avatar_border_color: null
+
+input:
+  background_color: "#1d2021"
+  opacity: 1.0
+  border_color: "#928374"
+  border_opacity: 0.45
+  # null falls back to appearance.accent_color.
+  focus_border_color: null
+  # 999 gives a full pill shape.
+  border_radius: 999
+  height: 42
+  # Character used to mask typed password characters.
+  dot_char: "•"
+  # Extra pixel spacing between masked password dots.
+  dot_spacing: 2
+  placeholder: "Enter password"
+  show_peek_icon: true
+  cursor_glide:
+    enabled: true
+    duration_ms: 150
+    width: 3.0
+    corner_radius: 1.5
+    trail_smear: 0.85
+    # Matches Ghostty Gruvbox Material Dark cursor; null falls back to appearance.accent_color.
+    color: "#d4be98"
+
+appearance:
+  # Installed UI options: "Adwaita Sans", "Inter", "Noto Sans", "Cantarell", "Carlito"
+  font_family: "Adwaita Sans"
+  text_color: "#ebdbb2"
+  muted_color: "#bdae93"
+  accent_color: "#b8bb26"
+  accent_text_color: "#1d2021"
+  error_color: "#fb4934"
+  # Darkening scrim over the wallpaper (0.0 disables, 0.9 max).
+  backdrop_dim: 0.12
+
+wallpaper:
+  path: "/usr/share/backgrounds/greeter-wallpaper.jpg"
+  # "auto", "image", or "solid"
+  mode: auto
+  # "cover", "contain", or "fill"
+  fill_mode: cover
+  # Set > 0 to apply Gaussian-style blur to static images.
+  blur_sigma: 0.0
+  solid_color: "#1d2021"
+
+keyboard:
+  show_capslock_warning: true

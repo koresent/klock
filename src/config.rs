@@ -118,7 +118,7 @@ fn default_card_bg() -> String {
     "#282828".to_string()
 }
 fn default_card_opacity() -> f32 {
-    0.84
+    1.0
 }
 fn default_border_color() -> String {
     "#928374".to_string()
@@ -196,7 +196,7 @@ fn default_input_bg() -> String {
     "#1d2021".to_string()
 }
 fn default_input_opacity() -> f32 {
-    0.45
+    1.0
 }
 fn default_input_radius() -> f32 {
     999.0

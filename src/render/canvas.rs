@@ -19,7 +19,9 @@ pub struct CardUiState<'a> {
 
 pub struct UiRenderer {
     font: FontRenderer,
+    source_wallpaper: Option<image::DynamicImage>,
     cached_wallpaper: Option<Pixmap>,
+    cached_size: (u32, u32),
     cached_avatar: Option<Pixmap>,
 }
 
@@ -28,13 +30,17 @@ impl UiRenderer {
         let font = FontRenderer::load_default()?;
         Ok(Self {
             font,
+            source_wallpaper: None,
             cached_wallpaper: None,
+            cached_size: (0, 0),
             cached_avatar: None,
         })
     }
 
-    pub fn set_wallpaper(&mut self, pixmap: Pixmap) {
-        self.cached_wallpaper = Some(pixmap);
+    pub fn set_source_wallpaper(&mut self, img: image::DynamicImage) {
+        self.source_wallpaper = Some(img);
+        self.cached_wallpaper = None;
+        self.cached_size = (0, 0);
     }
 
     pub fn set_avatar(&mut self, pixmap: Pixmap) {
@@ -42,7 +48,7 @@ impl UiRenderer {
     }
 
     pub fn render_frame(
-        &self,
+        &mut self,
         target: &mut PixmapMut,
         cfg: &Config,
         state: &CardUiState,
@@ -50,19 +56,37 @@ impl UiRenderer {
     ) {
         let screen_w = target.width() as f32;
         let screen_h = target.height() as f32;
+        let target_w = target.width();
+        let target_h = target.height();
 
-        if let Some(ref wall) = self.cached_wallpaper {
-            target.draw_pixmap(
-                0,
-                0,
-                wall.as_ref(),
-                &PixmapPaint::default(),
-                Transform::identity(),
-                None,
-            );
-        } else {
-            let solid = parse_color(&cfg.wallpaper.solid_color, 1.0);
-            target.fill(solid);
+        // 1. Fill solid background first (guarantees zero uninitialized memory artifacts)
+        let solid = parse_color(&cfg.wallpaper.solid_color, 1.0);
+        target.fill(solid);
+
+        // 2. Render and cache wallpaper dynamically scaled to exact target resolution
+        if let Some(ref wall_img) = self.source_wallpaper {
+            if (self.cached_wallpaper.is_none() || self.cached_size != (target_w, target_h))
+                && let Ok(pix) = crate::render::image::render_wallpaper(
+                    wall_img,
+                    target_w,
+                    target_h,
+                    cfg.wallpaper.blur_sigma,
+                    cfg.appearance.backdrop_dim,
+                )
+            {
+                self.cached_wallpaper = Some(pix);
+                self.cached_size = (target_w, target_h);
+            }
+            if let Some(ref wall) = self.cached_wallpaper {
+                target.draw_pixmap(
+                    0,
+                    0,
+                    wall.as_ref(),
+                    &PixmapPaint::default(),
+                    Transform::identity(),
+                    None,
+                );
+            }
         }
 
         if !is_primary {
@@ -173,11 +197,11 @@ impl UiRenderer {
                 None,
             );
 
-            let border_width = cfg.card.avatar_border_width.max(1.5);
+            let border_width = cfg.card.avatar_border_width.max(1.0);
             let av_border_col = if let Some(ref c) = cfg.card.avatar_border_color {
                 parse_color(c, 1.0)
             } else {
-                parse_color(&cfg.card.border_color, 0.70)
+                parse_color(&cfg.appearance.accent_color, 1.0)
             };
             let mut pb = PathBuilder::new();
             pb.push_circle(
@@ -213,8 +237,13 @@ impl UiRenderer {
             .draw_text(target, name, nx, content_y, 19.0, text_color);
         content_y += 34.0;
 
-        self.draw_input_box(target, cfg, state, cx, content_y, cw);
-        content_y += cfg.input.height + 12.0;
+        let (input_rect, peek_rect, submit_rect) =
+            compute_input_row_geometry(card_rect, cfg, content_y);
+
+        self.draw_input_box(target, cfg, state, input_rect, peek_rect);
+        self.draw_submit_button(target, cfg, state, submit_rect);
+
+        content_y += cfg.input.height + 14.0;
 
         if state.capslock && cfg.keyboard.show_capslock_warning {
             let caps_text = "CAPS LOCK";
@@ -250,31 +279,70 @@ impl UiRenderer {
         }
     }
 
+    fn draw_submit_button(
+        &self,
+        target: &mut PixmapMut,
+        cfg: &Config,
+        _state: &CardUiState,
+        submit_rect: Rect,
+    ) {
+        let cx = submit_rect.x() + submit_rect.width() / 2.0;
+        let cy = submit_rect.y() + submit_rect.height() / 2.0;
+        let radius = submit_rect.width() / 2.0;
+
+        let mut pb = PathBuilder::new();
+        pb.push_circle(cx, cy, radius);
+        if let Some(circle_path) = pb.finish() {
+            let bg_color = parse_color(&cfg.appearance.accent_color, 1.0);
+            let mut bg_paint = Paint::default();
+            bg_paint.set_color(bg_color);
+            bg_paint.anti_alias = true;
+            target.fill_path(
+                &circle_path,
+                &bg_paint,
+                FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
+        }
+
+        let icon_color = parse_color(&cfg.appearance.accent_text_color, 1.0);
+        let mut icon_pb = PathBuilder::new();
+        icon_pb.move_to(cx - 3.0, cy - 6.0);
+        icon_pb.line_to(cx + 3.5, cy);
+        icon_pb.line_to(cx - 3.0, cy + 6.0);
+
+        if let Some(icon_path) = icon_pb.finish() {
+            let mut paint = Paint::default();
+            paint.set_color(icon_color);
+            paint.anti_alias = true;
+            let stroke = Stroke {
+                width: 2.2,
+                line_cap: LineCap::Round,
+                ..Default::default()
+            };
+            target.stroke_path(&icon_path, &paint, &stroke, Transform::identity(), None);
+        }
+    }
+
     fn draw_input_box(
         &self,
         target: &mut PixmapMut,
         cfg: &Config,
         state: &CardUiState,
-        cx: f32,
-        cy: f32,
-        cw: f32,
+        input_rect: Rect,
+        peek_rect: Rect,
     ) {
-        let input_w = cw - (cfg.card.padding_x * 2.0);
-        let input_h = cfg.input.height;
-        let input_x = cx + cfg.card.padding_x;
-        let input_y = cy;
-
-        let rect = match Rect::from_xywh(input_x, input_y, input_w, input_h) {
-            Some(r) => r,
-            None => return,
-        };
+        let input_x = input_rect.x();
+        let input_y = input_rect.y();
+        let input_h = input_rect.height();
 
         let bg_color = parse_color(&cfg.input.background_color, cfg.input.opacity);
         let mut bg_paint = Paint::default();
         bg_paint.set_color(bg_color);
         bg_paint.anti_alias = true;
 
-        let path = rounded_rect_path(rect, cfg.input.border_radius);
+        let path = rounded_rect_path(input_rect, cfg.input.border_radius);
         target.fill_path(
             &path,
             &bg_paint,
@@ -297,7 +365,7 @@ impl UiRenderer {
         };
         target.stroke_path(&path, &border_paint, &stroke, Transform::identity(), None);
 
-        let text_pad_x = 18.0;
+        let text_pad_x = 16.0;
         let baseline_y = input_y + (input_h - 16.0) / 2.0 - 2.0;
 
         if state.password_len == 0 {
@@ -341,25 +409,6 @@ impl UiRenderer {
             self.draw_cursor_glide(target, cfg, state, input_x + text_pad_x, input_y, input_h);
         }
 
-        self.draw_action_buttons(target, cfg, state, rect);
-    }
-
-    fn draw_action_buttons(
-        &self,
-        target: &mut PixmapMut,
-        cfg: &Config,
-        state: &CardUiState,
-        input_rect: Rect,
-    ) {
-        let (peek_rect, submit_rect) = get_buttons_geometry(input_rect);
-
-        let submit_color = if state.password_len > 0 {
-            parse_color(&cfg.appearance.accent_color, 0.95)
-        } else {
-            parse_color(&cfg.appearance.muted_color, 0.40)
-        };
-        draw_arrow_button(target, submit_rect, submit_color);
-
         if cfg.input.show_peek_icon {
             let peek_color = if state.reveal_password {
                 parse_color(&cfg.appearance.accent_color, 0.95)
@@ -384,15 +433,11 @@ impl UiRenderer {
         let cursor_h = input_h * 0.44;
         let cursor_y = input_y + (input_h - cursor_h) / 2.0;
 
-        let glide_x = base_x + state.glide.current_x;
-        let trail_x = base_x + state.glide.trail_x;
-
+        let glide_x = base_x + state.glide.cur_x;
         let cursor_color = parse_color(&cfg.input.cursor_glide.color, 0.95);
 
-        if (glide_x - trail_x).abs() > 1.0 && cfg.input.cursor_glide.trail_smear > 0.01 {
-            let left = glide_x.min(trail_x);
-            let right = glide_x.max(trail_x) + cfg.input.cursor_glide.width;
-            let smear_w = (right - left).max(cfg.input.cursor_glide.width);
+        if let Some((smear_left, smear_w)) = state.glide.smear_geometry() {
+            let left = base_x + smear_left;
             if let Some(smear_rect) = Rect::from_xywh(left, cursor_y, smear_w, cursor_h) {
                 let smear_color = parse_color(
                     &cfg.input.cursor_glide.color,
@@ -462,59 +507,32 @@ pub fn compute_card_height(cfg: &Config, capslock: bool) -> f32 {
     h.round()
 }
 
-pub fn get_buttons_geometry(input_rect: Rect) -> (Rect, Rect) {
-    let btn_size = 28.0;
-    let btn_y = input_rect.y() + (input_rect.height() - btn_size) / 2.0;
-    let submit_x = input_rect.x() + input_rect.width() - btn_size - 8.0;
-    let peek_x = submit_x - btn_size - 4.0;
+pub fn compute_input_row_geometry(
+    card_rect: Rect,
+    cfg: &Config,
+    content_y: f32,
+) -> (Rect, Rect, Rect) {
+    let row_x = card_rect.x() + cfg.card.padding_x;
+    let row_w = card_rect.width() - (cfg.card.padding_x * 2.0);
+    let row_h = cfg.input.height;
 
-    let submit_rect = Rect::from_xywh(submit_x, btn_y, btn_size, btn_size).unwrap();
-    let peek_rect = Rect::from_xywh(peek_x, btn_y, btn_size, btn_size).unwrap();
-    (peek_rect, submit_rect)
+    let btn_size = row_h;
+    let gap = 10.0;
+    let input_w = (row_w - btn_size - gap).max(100.0);
+
+    let input_rect = Rect::from_xywh(row_x, content_y, input_w, row_h).unwrap();
+    let submit_rect =
+        Rect::from_xywh(row_x + input_w + gap, content_y, btn_size, btn_size).unwrap();
+
+    let peek_size = 24.0;
+    let peek_x = input_rect.x() + input_rect.width() - peek_size - 10.0;
+    let peek_y = input_rect.y() + (input_rect.height() - peek_size) / 2.0;
+    let peek_rect = Rect::from_xywh(peek_x, peek_y, peek_size, peek_size).unwrap();
+
+    (input_rect, peek_rect, submit_rect)
 }
 
-fn draw_arrow_button(target: &mut PixmapMut, rect: Rect, color: Color) {
-    let cx = rect.x() + rect.width() / 2.0;
-    let cy = rect.y() + rect.height() / 2.0;
-
-    let mut circle_builder = PathBuilder::new();
-    circle_builder.push_circle(cx, cy, rect.width() / 2.0);
-    if let Some(circle_path) = circle_builder.finish() {
-        let mut bg_paint = Paint::default();
-        let mut bg_color = color;
-        bg_color.apply_opacity(0.18);
-        bg_paint.set_color(bg_color);
-        bg_paint.anti_alias = true;
-        target.fill_path(
-            &circle_path,
-            &bg_paint,
-            FillRule::Winding,
-            Transform::identity(),
-            None,
-        );
-    }
-
-    let mut pb = PathBuilder::new();
-    pb.move_to(cx - 5.5, cy);
-    pb.line_to(cx + 4.5, cy);
-    pb.move_to(cx + 0.5, cy - 4.0);
-    pb.line_to(cx + 5.0, cy);
-    pb.line_to(cx + 0.5, cy + 4.0);
-
-    if let Some(path) = pb.finish() {
-        let mut paint = Paint::default();
-        paint.set_color(color);
-        paint.anti_alias = true;
-        let stroke = Stroke {
-            width: 2.0,
-            line_cap: LineCap::Round,
-            ..Default::default()
-        };
-        target.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
-    }
-}
-
-fn draw_eye_icon(target: &mut PixmapMut, rect: Rect, slashed: bool, color: Color) {
+fn draw_eye_icon(target: &mut PixmapMut, rect: Rect, revealed: bool, color: Color) {
     let cx = rect.x() + rect.width() / 2.0;
     let cy = rect.y() + rect.height() / 2.0;
 
@@ -551,7 +569,7 @@ fn draw_eye_icon(target: &mut PixmapMut, rect: Rect, slashed: bool, color: Color
         );
     }
 
-    if slashed {
+    if revealed {
         let mut slash_pb = PathBuilder::new();
         slash_pb.move_to(cx - 6.5, cy - 6.5);
         slash_pb.line_to(cx + 6.5, cy + 6.5);

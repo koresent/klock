@@ -41,8 +41,8 @@ use crate::auth::{AuthResponse, AuthState, AuthWorker};
 use crate::config::Config;
 use crate::render::animations::{CursorGlideState, ShakeAnimation};
 use crate::render::{
-    CardUiState, UiRenderer, compute_card_height, get_buttons_geometry, load_image,
-    render_circular_avatar, render_wallpaper,
+    CardUiState, UiRenderer, compute_card_height, compute_input_row_geometry, load_image,
+    render_circular_avatar,
 };
 
 pub struct SurfaceView {
@@ -123,15 +123,8 @@ impl LockApp {
 
         if let Some(wall_path) = cfg.resolve_wallpaper()
             && let Ok(wall_img) = load_image(&wall_path)
-            && let Ok(wall_pix) = render_wallpaper(
-                &wall_img,
-                1920,
-                1080,
-                cfg.wallpaper.blur_sigma,
-                cfg.appearance.backdrop_dim,
-            )
         {
-            ui.set_wallpaper(wall_pix);
+            ui.set_source_wallpaper(wall_img);
         }
 
         if cfg.card.show_avatar
@@ -661,21 +654,19 @@ impl LockApp {
         let card_x = ((screen_w - card_w) / 2.0).round();
         let card_y = ((screen_h - card_h) / 2.0).round();
 
-        let input_w = card_w - (self.cfg.card.padding_x * 2.0);
-        let input_h = self.cfg.input.height;
-        let input_x = card_x + self.cfg.card.padding_x;
-        let mut input_y = card_y + self.cfg.card.padding_y;
-        if self.cfg.card.show_avatar {
-            input_y += self.cfg.card.avatar_size + 14.0;
-        }
-        input_y += 34.0;
-
-        let input_rect = match tiny_skia::Rect::from_xywh(input_x, input_y, input_w, input_h) {
+        let card_rect = match tiny_skia::Rect::from_xywh(card_x, card_y, card_w, card_h) {
             Some(r) => r,
             None => return,
         };
 
-        let (peek_rect, submit_rect) = get_buttons_geometry(input_rect);
+        let mut content_y = card_y + self.cfg.card.padding_y;
+        if self.cfg.card.show_avatar {
+            content_y += self.cfg.card.avatar_size + 14.0;
+        }
+        content_y += 34.0;
+
+        let (_input_rect, peek_rect, submit_rect) =
+            compute_input_row_geometry(card_rect, &self.cfg, content_y);
 
         if peek_rect.x() <= px
             && px <= peek_rect.x() + peek_rect.width()
