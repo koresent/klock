@@ -38,7 +38,8 @@ jobs:
             libclang-dev \
             libpam0g-dev \
             libxkbcommon-dev \
-            libwayland-dev
+            libwayland-dev \
+            fonts-dejavu-core
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

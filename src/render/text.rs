@@ -14,6 +14,9 @@ impl FontRenderer {
             "/usr/share/fonts/adwaita-sans/AdwaitaSans-Regular.otf",
             "/usr/share/fonts/noto/NotoSans-Regular.ttf",
             "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
         ];
 
         for path in candidates {
