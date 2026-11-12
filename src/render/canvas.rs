@@ -58,11 +58,7 @@ impl UiRenderer {
         let target_w = target.width();
         let target_h = target.height();
 
-        // 1. Fill solid background first (guarantees zero uninitialized memory artifacts)
-        let solid = parse_color(&cfg.wallpaper.solid_color, 1.0);
-        target.fill(solid);
-
-        // 2. Render and cache wallpaper per resolution (avoids re-rendering in multi-monitor setups)
+        // 1. Fast wallpaper blit via SIMD memcpy (zero software alpha-blending overhead)
         if let Some(ref wall_img) = self.source_wallpaper {
             let key = (target_w, target_h);
             if !self.cached_wallpapers.contains_key(&key)
@@ -77,15 +73,19 @@ impl UiRenderer {
                 self.cached_wallpapers.insert(key, pix);
             }
             if let Some(wall) = self.cached_wallpapers.get(&key) {
-                target.draw_pixmap(
-                    0,
-                    0,
-                    wall.as_ref(),
-                    &PixmapPaint::default(),
-                    Transform::identity(),
-                    None,
-                );
+                if wall.width() == target_w && wall.height() == target_h {
+                    target.data_mut().copy_from_slice(wall.data());
+                } else {
+                    let solid = parse_color(&cfg.wallpaper.solid_color, 1.0);
+                    target.fill(solid);
+                }
+            } else {
+                let solid = parse_color(&cfg.wallpaper.solid_color, 1.0);
+                target.fill(solid);
             }
+        } else {
+            let solid = parse_color(&cfg.wallpaper.solid_color, 1.0);
+            target.fill(solid);
         }
 
         if !is_primary {
@@ -410,48 +410,77 @@ impl UiRenderer {
         target.stroke_path(&path, &border_paint, &stroke, Transform::identity(), None);
 
         let text_pad_x = 16.0;
+        let text_start_x = input_x + text_pad_x;
+        let text_end_x = if cfg.input.show_peek_icon {
+            peek_rect.x() - 8.0
+        } else {
+            input_x + input_rect.width() - text_pad_x
+        };
+        let max_text_w = (text_end_x - text_start_x).max(40.0);
         let baseline_y = input_y + (input_h - 16.0) / 2.0 - 2.0;
 
+        let content_w = self.compute_dot_x_offset(
+            cfg,
+            state.password_len,
+            state.password_text,
+            state.reveal_password,
+        );
+        let scroll_x = (content_w - max_text_w).max(0.0);
+
         if state.password_len == 0 {
-            // Matching kgreet: opacity 0.88 with padding-left: 6-8px so cursor does not overlap "Enter"
             let placeholder_color = parse_color(&cfg.appearance.muted_color, 0.88);
-            self.font.draw_text(
+            self.font.draw_text_clipped(
                 target,
                 &cfg.input.placeholder,
-                input_x + text_pad_x + 8.0,
+                text_start_x + 8.0,
                 baseline_y,
                 14.0,
                 placeholder_color,
+                (text_start_x, text_end_x),
             );
         } else if state.reveal_password {
             let text_color = parse_color(&cfg.appearance.text_color, 0.95);
-            self.font.draw_text(
+            self.font.draw_text_clipped(
                 target,
                 state.password_text,
-                input_x + text_pad_x,
+                text_start_x - scroll_x,
                 baseline_y,
                 14.0,
                 text_color,
+                (text_start_x, text_end_x),
             );
         } else {
             let dot_color = parse_color(&cfg.appearance.text_color, 0.95);
-            let mut dot_x = input_x + text_pad_x;
+            let (dw, _) = self.font.measure_text(&cfg.input.dot_char, 16.0);
+            let step = dw + cfg.input.dot_spacing;
+            let mut dot_x = text_start_x - scroll_x;
             for _ in 0..state.password_len {
-                self.font.draw_text(
-                    target,
-                    &cfg.input.dot_char,
-                    dot_x,
-                    baseline_y + 1.0,
-                    16.0,
-                    dot_color,
-                );
-                let (dw, _) = self.font.measure_text(&cfg.input.dot_char, 16.0);
-                dot_x += dw + cfg.input.dot_spacing;
+                if dot_x + dw >= text_start_x && dot_x <= text_end_x {
+                    self.font.draw_text_clipped(
+                        target,
+                        &cfg.input.dot_char,
+                        dot_x,
+                        baseline_y + 1.0,
+                        16.0,
+                        dot_color,
+                        (text_start_x, text_end_x),
+                    );
+                }
+                dot_x += step;
             }
         }
 
         if cfg.input.cursor_glide.enabled {
-            self.draw_cursor_glide(target, cfg, state, input_x + text_pad_x, input_y, input_h);
+            self.draw_cursor_glide(
+                target,
+                cfg,
+                state,
+                text_start_x,
+                scroll_x,
+                max_text_w,
+                input_y,
+                input_h,
+            );
         }
 
         if cfg.input.show_peek_icon {
@@ -466,24 +495,33 @@ impl UiRenderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_cursor_glide(
         &self,
         target: &mut PixmapMut,
         cfg: &Config,
         state: &CardUiState,
         base_x: f32,
+        scroll_x: f32,
+        max_text_w: f32,
         input_y: f32,
         input_h: f32,
     ) {
         let cursor_h = input_h * 0.44;
         let cursor_y = input_y + (input_h - cursor_h) / 2.0;
 
-        let glide_x = base_x + state.glide.cur_x;
+        let rel_cursor = (state.glide.cur_x - scroll_x).clamp(0.0, max_text_w);
+        let glide_x = base_x + rel_cursor;
         let cursor_color = parse_color(&cfg.input.cursor_glide.color, 0.95);
 
-        if let Some((smear_left, smear_w)) = state.glide.smear_geometry() {
-            let left = base_x + smear_left;
-            if let Some(smear_rect) = Rect::from_xywh(left, cursor_y, smear_w, cursor_h) {
+        if let Some((smear_left, smear_w)) = state.glide.current_smear {
+            let rel_left = (smear_left - scroll_x).max(0.0);
+            let rel_right = (smear_left + smear_w - scroll_x).min(max_text_w + cfg.input.cursor_glide.width);
+            let clamped_w = (rel_right - rel_left).max(0.0);
+            if clamped_w > cfg.input.cursor_glide.width
+                && let Some(smear_rect) =
+                    Rect::from_xywh(base_x + rel_left, cursor_y, clamped_w, cursor_h)
+            {
                 let smear_color = parse_color(
                     &cfg.input.cursor_glide.color,
                     0.35 * cfg.input.cursor_glide.trail_smear,

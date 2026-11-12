@@ -53,6 +53,7 @@ pub struct SurfaceView {
     pub width: u32,
     pub height: u32,
     pub is_primary: bool,
+    pub has_drawn: bool,
     pub pool: SlotPool,
 }
 
@@ -203,6 +204,7 @@ impl LockApp {
                     width: 960,
                     height: 540,
                     is_primary: true,
+                    has_drawn: false,
                     pool,
                 },
             );
@@ -260,6 +262,7 @@ impl LockApp {
                 width: 1920,
                 height: 1080,
                 is_primary,
+                has_drawn: false,
                 pool,
             },
         );
@@ -317,7 +320,12 @@ impl LockApp {
     }
 
     pub fn redraw_all(&mut self) {
-        let surface_ids: Vec<u32> = self.surfaces.keys().copied().collect();
+        let surface_ids: Vec<u32> = self
+            .surfaces
+            .iter()
+            .filter(|(_, v)| v.is_primary || !v.has_drawn)
+            .map(|(id, _)| *id)
+            .collect();
         for id in surface_ids {
             self.redraw_surface(id);
         }
@@ -351,9 +359,10 @@ impl LockApp {
             None => return,
         };
 
+        let char_count = self.password.chars().count();
         let state = CardUiState {
             display_name: &self.display_name,
-            password_len: self.password.len(),
+            password_len: char_count,
             password_text: &self.password,
             reveal_password: self.reveal_password,
             capslock: self.capslock,
@@ -368,6 +377,7 @@ impl LockApp {
         view.surface.attach(Some(buffer.wl_buffer()), 0, 0);
         view.surface.damage_buffer(0, 0, w as i32, h as i32);
         view.surface.commit();
+        view.has_drawn = true;
     }
 
     pub fn unlock_and_exit(&mut self) {
@@ -389,9 +399,10 @@ impl LockApp {
     }
 
     fn update_cursor_glide(&mut self) {
+        let char_count = self.password.chars().count();
         let target_x = self.ui.compute_dot_x_offset(
             &self.cfg,
-            self.password.len(),
+            char_count,
             &self.password,
             self.reveal_password,
         );
@@ -461,9 +472,12 @@ impl SessionLockHandler for LockApp {
     ) {
         let (w, h) = configure.new_size;
         let id = session_lock_surface.wl_surface().id().protocol_id();
-        if let Some(view) = self.surfaces.get_mut(&id) {
+        if let Some(view) = self.surfaces.get_mut(&id)
+            && (view.width != w || view.height != h)
+        {
             view.width = w;
             view.height = h;
+            view.has_drawn = false;
         }
         self.redraw_surface(id);
     }

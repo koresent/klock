@@ -86,6 +86,36 @@ impl FontRenderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_text_clipped(
+        &self,
+        pixmap: &mut PixmapMut,
+        text: &str,
+        mut x: f32,
+        y: f32,
+        px_size: f32,
+        color: Color,
+        clip_x: (f32, f32),
+    ) {
+        let clip_min = clip_x.0.floor() as i32;
+        let clip_max = clip_x.1.ceil() as i32;
+        for ch in text.chars() {
+            let (metrics, bitmap) = self.font.rasterize(ch, px_size);
+            let gx = x + metrics.xmin as f32;
+            let gy = y + px_size - metrics.ymin as f32 - metrics.height as f32;
+
+            self.blend_glyph_clipped(
+                pixmap,
+                &bitmap,
+                (metrics.width, metrics.height),
+                (gx, gy),
+                color,
+                Some((clip_min, clip_max)),
+            );
+            x += metrics.advance_width;
+        }
+    }
+
     pub fn draw_text(
         &self,
         pixmap: &mut PixmapMut,
@@ -119,6 +149,18 @@ impl FontRenderer {
         pos: (f32, f32),
         color: Color,
     ) {
+        self.blend_glyph_clipped(pixmap, bitmap, size, pos, color, None);
+    }
+
+    fn blend_glyph_clipped(
+        &self,
+        pixmap: &mut PixmapMut,
+        bitmap: &[u8],
+        size: (usize, usize),
+        pos: (f32, f32),
+        color: Color,
+        clip_x: Option<(i32, i32)>,
+    ) {
         let (w, h) = size;
         let (gx, gy) = pos;
         let cr = color.red();
@@ -128,6 +170,10 @@ impl FontRenderer {
 
         let pix_w = pixmap.width() as i32;
         let pix_h = pixmap.height() as i32;
+        let (min_x, max_x) = match clip_x {
+            Some((cmin, cmax)) => (cmin.max(0), cmax.min(pix_w)),
+            None => (0, pix_w),
+        };
         let stride = pixmap.width() as usize;
         let buf = pixmap.data_mut();
 
@@ -139,7 +185,7 @@ impl FontRenderer {
 
             for col in 0..w {
                 let px = (gx as i32) + col as i32;
-                if px < 0 || px >= pix_w {
+                if px < min_x || px >= max_x {
                     continue;
                 }
 
