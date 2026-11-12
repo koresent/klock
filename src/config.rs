@@ -29,6 +29,30 @@ pub struct UserConfig {
     pub display_name: Option<String>,
 }
 
+impl UserConfig {
+    pub fn resolve_display_name(&self) -> String {
+        if let Some(ref name) = self.display_name
+            && !name.trim().is_empty()
+        {
+            return name.trim().to_string();
+        }
+        if self.show_display_name
+            && let Ok(passwd) = std::fs::read_to_string("/etc/passwd")
+        {
+            for line in passwd.lines() {
+                let parts: Vec<&str> = line.split(':').collect();
+                if parts.len() >= 5 && parts[0] == self.default {
+                    let gecos = parts[4].split(',').next().unwrap_or("").trim();
+                    if !gecos.is_empty() {
+                        return gecos.to_string();
+                    }
+                }
+            }
+        }
+        self.default.clone()
+    }
+}
+
 impl Default for UserConfig {
     fn default() -> Self {
         Self {

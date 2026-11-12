@@ -2,15 +2,16 @@ use crate::config::{Config, parse_color};
 use crate::render::animations::{CursorGlideState, ShakeAnimation};
 use crate::render::text::FontRenderer;
 use tiny_skia::{
-    Color, FillRule, Paint, PathBuilder, Pixmap, PixmapMut, PixmapPaint, Rect, Stroke, Transform,
+    Color, FillRule, LineCap, Paint, PathBuilder, Pixmap, PixmapMut, PixmapPaint, Rect, Stroke,
+    Transform,
 };
 
 pub struct CardUiState<'a> {
-    pub username: &'a str,
-    pub display_name: Option<&'a str>,
+    pub display_name: &'a str,
     pub password_len: usize,
+    pub password_text: &'a str,
+    pub reveal_password: bool,
     pub capslock: bool,
-    pub layout: &'a str,
     pub error: bool,
     pub glide: &'a CursorGlideState,
     pub shake: &'a ShakeAnimation,
@@ -72,7 +73,7 @@ impl UiRenderer {
 
         let shake_x = state.shake.offset_x();
         let card_w = cfg.card.width;
-        let card_h = 320.0;
+        let card_h = compute_card_height(cfg, state.capslock);
         let card_x = ((screen_w - card_w) / 2.0 + shake_x).round();
         let card_y = ((screen_h - card_h) / 2.0).round();
 
@@ -162,18 +163,49 @@ impl UiRenderer {
         {
             let av_size = cfg.card.avatar_size;
             let av_x = (cx + (cw - av_size) / 2.0).round();
+            let av_y = content_y;
             target.draw_pixmap(
                 av_x as i32,
-                content_y as i32,
+                av_y as i32,
                 avatar.as_ref(),
                 &PixmapPaint::default(),
                 Transform::identity(),
                 None,
             );
+
+            let border_width = cfg.card.avatar_border_width.max(1.5);
+            let av_border_col = if let Some(ref c) = cfg.card.avatar_border_color {
+                parse_color(c, 1.0)
+            } else {
+                parse_color(&cfg.card.border_color, 0.70)
+            };
+            let mut pb = PathBuilder::new();
+            pb.push_circle(
+                av_x + av_size / 2.0,
+                av_y + av_size / 2.0,
+                (av_size - border_width) / 2.0,
+            );
+            if let Some(circle_path) = pb.finish() {
+                let mut circle_paint = Paint::default();
+                circle_paint.set_color(av_border_col);
+                circle_paint.anti_alias = true;
+                let stroke = Stroke {
+                    width: border_width,
+                    ..Default::default()
+                };
+                target.stroke_path(
+                    &circle_path,
+                    &circle_paint,
+                    &stroke,
+                    Transform::identity(),
+                    None,
+                );
+            }
+
             content_y += av_size + 14.0;
         }
 
-        let name = state.display_name.unwrap_or(state.username);
+        let name = state.display_name;
         let (nw, _) = self.font.measure_text(name, 19.0);
         let nx = (cx + (cw - nw) / 2.0).round();
         let text_color = parse_color(&cfg.appearance.text_color, 1.0);
@@ -184,7 +216,38 @@ impl UiRenderer {
         self.draw_input_box(target, cfg, state, cx, content_y, cw);
         content_y += cfg.input.height + 12.0;
 
-        self.draw_footer(target, cfg, state, cx, content_y, cw);
+        if state.capslock && cfg.keyboard.show_capslock_warning {
+            let caps_text = "CAPS LOCK";
+            let (cw_len, _) = self.font.measure_text(caps_text, 11.0);
+            let pill_w = cw_len + 16.0;
+            let pill_h = 22.0;
+            let pill_x = cx + (cw - pill_w) / 2.0;
+            let pill_y = content_y;
+
+            if let Some(pill_rect) = Rect::from_xywh(pill_x, pill_y, pill_w, pill_h) {
+                let pill_bg = parse_color(&cfg.appearance.error_color, 0.22);
+                let mut pill_paint = Paint::default();
+                pill_paint.set_color(pill_bg);
+                let path = rounded_rect_path(pill_rect, 11.0);
+                target.fill_path(
+                    &path,
+                    &pill_paint,
+                    FillRule::Winding,
+                    Transform::identity(),
+                    None,
+                );
+
+                let caps_color = parse_color(&cfg.appearance.error_color, 0.95);
+                self.font.draw_text(
+                    target,
+                    caps_text,
+                    pill_x + 8.0,
+                    pill_y + 4.0,
+                    11.0,
+                    caps_color,
+                );
+            }
+        }
     }
 
     fn draw_input_box(
@@ -247,6 +310,16 @@ impl UiRenderer {
                 14.0,
                 placeholder_color,
             );
+        } else if state.reveal_password {
+            let text_color = parse_color(&cfg.appearance.text_color, 0.95);
+            self.font.draw_text(
+                target,
+                state.password_text,
+                input_x + text_pad_x,
+                baseline_y,
+                14.0,
+                text_color,
+            );
         } else {
             let dot_color = parse_color(&cfg.appearance.text_color, 0.95);
             let mut dot_x = input_x + text_pad_x;
@@ -266,6 +339,36 @@ impl UiRenderer {
 
         if cfg.input.cursor_glide.enabled {
             self.draw_cursor_glide(target, cfg, state, input_x + text_pad_x, input_y, input_h);
+        }
+
+        self.draw_action_buttons(target, cfg, state, rect);
+    }
+
+    fn draw_action_buttons(
+        &self,
+        target: &mut PixmapMut,
+        cfg: &Config,
+        state: &CardUiState,
+        input_rect: Rect,
+    ) {
+        let (peek_rect, submit_rect) = get_buttons_geometry(input_rect);
+
+        let submit_color = if state.password_len > 0 {
+            parse_color(&cfg.appearance.accent_color, 0.95)
+        } else {
+            parse_color(&cfg.appearance.muted_color, 0.40)
+        };
+        draw_arrow_button(target, submit_rect, submit_color);
+
+        if cfg.input.show_peek_icon {
+            let peek_color = if state.reveal_password {
+                parse_color(&cfg.appearance.accent_color, 0.95)
+            } else if state.password_len > 0 {
+                parse_color(&cfg.appearance.muted_color, 0.75)
+            } else {
+                parse_color(&cfg.appearance.muted_color, 0.35)
+            };
+            draw_eye_icon(target, peek_rect, state.reveal_password, peek_color);
         }
     }
 
@@ -325,68 +428,144 @@ impl UiRenderer {
         }
     }
 
-    fn draw_footer(
+    pub fn compute_dot_x_offset(
         &self,
-        target: &mut PixmapMut,
         cfg: &Config,
-        state: &CardUiState,
-        cx: f32,
-        cy: f32,
-        cw: f32,
-    ) {
-        let layout_str = state.layout.to_uppercase();
-        let (lw, _) = self.font.measure_text(&layout_str, 12.0);
-        let layout_color = parse_color(&cfg.appearance.accent_color, 0.85);
-
-        if state.capslock && cfg.keyboard.show_capslock_warning {
-            let caps_text = "CAPS LOCK";
-            let (cw_len, _) = self.font.measure_text(caps_text, 11.0);
-            let pill_w = cw_len + 16.0;
-            let pill_h = 22.0;
-            let pill_x = cx + (cw - pill_w) / 2.0;
-            let pill_y = cy;
-
-            if let Some(pill_rect) = Rect::from_xywh(pill_x, pill_y, pill_w, pill_h) {
-                let pill_bg = parse_color(&cfg.appearance.error_color, 0.22);
-                let mut pill_paint = Paint::default();
-                pill_paint.set_color(pill_bg);
-                let path = rounded_rect_path(pill_rect, 11.0);
-                target.fill_path(
-                    &path,
-                    &pill_paint,
-                    FillRule::Winding,
-                    Transform::identity(),
-                    None,
-                );
-
-                let caps_color = parse_color(&cfg.appearance.error_color, 0.95);
-                self.font.draw_text(
-                    target,
-                    caps_text,
-                    pill_x + 8.0,
-                    pill_y + 4.0,
-                    11.0,
-                    caps_color,
-                );
-            }
-
-            let lx = cx + cw - cfg.card.padding_x - lw;
-            self.font
-                .draw_text(target, &layout_str, lx, cy + 4.0, 12.0, layout_color);
-        } else if cfg.keyboard.show_layout {
-            let lx = cx + (cw - lw) / 2.0;
-            self.font
-                .draw_text(target, &layout_str, lx, cy + 2.0, 12.0, layout_color);
-        }
-    }
-
-    pub fn compute_dot_x_offset(&self, cfg: &Config, password_len: usize) -> f32 {
+        password_len: usize,
+        password_text: &str,
+        reveal: bool,
+    ) -> f32 {
         if password_len == 0 {
             return 0.0;
         }
-        let (dw, _) = self.font.measure_text(&cfg.input.dot_char, 16.0);
-        let step = dw + cfg.input.dot_spacing;
-        step * password_len as f32
+        if reveal {
+            let (tw, _) = self.font.measure_text(password_text, 14.0);
+            tw
+        } else {
+            let (dw, _) = self.font.measure_text(&cfg.input.dot_char, 16.0);
+            let step = dw + cfg.input.dot_spacing;
+            step * password_len as f32
+        }
+    }
+}
+
+pub fn compute_card_height(cfg: &Config, capslock: bool) -> f32 {
+    let mut h = cfg.card.padding_y * 2.0;
+    if cfg.card.show_avatar {
+        h += cfg.card.avatar_size + 14.0;
+    }
+    h += 34.0;
+    h += cfg.input.height;
+    if capslock && cfg.keyboard.show_capslock_warning {
+        h += 28.0;
+    }
+    h.round()
+}
+
+pub fn get_buttons_geometry(input_rect: Rect) -> (Rect, Rect) {
+    let btn_size = 28.0;
+    let btn_y = input_rect.y() + (input_rect.height() - btn_size) / 2.0;
+    let submit_x = input_rect.x() + input_rect.width() - btn_size - 8.0;
+    let peek_x = submit_x - btn_size - 4.0;
+
+    let submit_rect = Rect::from_xywh(submit_x, btn_y, btn_size, btn_size).unwrap();
+    let peek_rect = Rect::from_xywh(peek_x, btn_y, btn_size, btn_size).unwrap();
+    (peek_rect, submit_rect)
+}
+
+fn draw_arrow_button(target: &mut PixmapMut, rect: Rect, color: Color) {
+    let cx = rect.x() + rect.width() / 2.0;
+    let cy = rect.y() + rect.height() / 2.0;
+
+    let mut circle_builder = PathBuilder::new();
+    circle_builder.push_circle(cx, cy, rect.width() / 2.0);
+    if let Some(circle_path) = circle_builder.finish() {
+        let mut bg_paint = Paint::default();
+        let mut bg_color = color;
+        bg_color.apply_opacity(0.18);
+        bg_paint.set_color(bg_color);
+        bg_paint.anti_alias = true;
+        target.fill_path(
+            &circle_path,
+            &bg_paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+
+    let mut pb = PathBuilder::new();
+    pb.move_to(cx - 5.5, cy);
+    pb.line_to(cx + 4.5, cy);
+    pb.move_to(cx + 0.5, cy - 4.0);
+    pb.line_to(cx + 5.0, cy);
+    pb.line_to(cx + 0.5, cy + 4.0);
+
+    if let Some(path) = pb.finish() {
+        let mut paint = Paint::default();
+        paint.set_color(color);
+        paint.anti_alias = true;
+        let stroke = Stroke {
+            width: 2.0,
+            line_cap: LineCap::Round,
+            ..Default::default()
+        };
+        target.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    }
+}
+
+fn draw_eye_icon(target: &mut PixmapMut, rect: Rect, slashed: bool, color: Color) {
+    let cx = rect.x() + rect.width() / 2.0;
+    let cy = rect.y() + rect.height() / 2.0;
+
+    let mut pb = PathBuilder::new();
+    pb.move_to(cx - 7.5, cy);
+    pb.quad_to(cx, cy - 5.5, cx + 7.5, cy);
+    pb.quad_to(cx, cy + 5.5, cx - 7.5, cy);
+    pb.close();
+
+    if let Some(path) = pb.finish() {
+        let mut paint = Paint::default();
+        paint.set_color(color);
+        paint.anti_alias = true;
+        let stroke = Stroke {
+            width: 1.5,
+            line_cap: LineCap::Round,
+            ..Default::default()
+        };
+        target.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    }
+
+    let mut pupil_pb = PathBuilder::new();
+    pupil_pb.push_circle(cx, cy, 2.4);
+    if let Some(pupil_path) = pupil_pb.finish() {
+        let mut paint = Paint::default();
+        paint.set_color(color);
+        paint.anti_alias = true;
+        target.fill_path(
+            &pupil_path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+
+    if slashed {
+        let mut slash_pb = PathBuilder::new();
+        slash_pb.move_to(cx - 6.5, cy - 6.5);
+        slash_pb.line_to(cx + 6.5, cy + 6.5);
+        if let Some(slash_path) = slash_pb.finish() {
+            let mut paint = Paint::default();
+            paint.set_color(color);
+            paint.anti_alias = true;
+            let stroke = Stroke {
+                width: 1.6,
+                line_cap: LineCap::Round,
+                ..Default::default()
+            };
+            target.stroke_path(&slash_path, &paint, &stroke, Transform::identity(), None);
+        }
     }
 }
 

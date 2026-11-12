@@ -14,6 +14,7 @@ use smithay_client_toolkit::{
     seat::{
         Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
+        pointer::{PointerEvent, PointerEventKind, PointerHandler},
     },
     session_lock::{
         SessionLock, SessionLockHandler, SessionLockState, SessionLockSurface,
@@ -32,7 +33,7 @@ use tiny_skia::PixmapMut;
 use wayland_client::{
     Connection, Proxy, QueueHandle,
     globals::GlobalList,
-    protocol::{wl_buffer, wl_keyboard, wl_output, wl_seat, wl_shm, wl_surface},
+    protocol::{wl_buffer, wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -40,7 +41,8 @@ use crate::auth::{AuthResponse, AuthState, AuthWorker};
 use crate::config::Config;
 use crate::render::animations::{CursorGlideState, ShakeAnimation};
 use crate::render::{
-    CardUiState, UiRenderer, load_image, render_circular_avatar, render_wallpaper,
+    CardUiState, UiRenderer, compute_card_height, get_buttons_geometry, load_image,
+    render_circular_avatar, render_wallpaper,
 };
 
 pub struct SurfaceView {
@@ -67,6 +69,8 @@ pub struct LockApp {
     pub xdg_shell: Option<XdgShell>,
 
     pub keyboard: Option<wl_keyboard::WlKeyboard>,
+    pub pointer: Option<wl_pointer::WlPointer>,
+    pub cursor_pos: (f64, f64),
     pub surfaces: HashMap<u32, SurfaceView>,
 
     pub cfg: Config,
@@ -74,11 +78,12 @@ pub struct LockApp {
     pub auth_worker: AuthWorker,
     pub auth_state: AuthState,
 
+    pub display_name: String,
     pub password: Zeroizing<String>,
+    pub reveal_password: bool,
     pub glide: CursorGlideState,
     pub shake: ShakeAnimation,
     pub capslock: bool,
-    pub layout_index: u32,
 
     pub is_windowed: bool,
     pub dev_escape: bool,
@@ -148,6 +153,7 @@ impl LockApp {
 
         let auth_worker = AuthWorker::spawn(mock_pam);
         let glide = CursorGlideState::new(cfg.input.cursor_glide.duration_ms);
+        let display_name = cfg.user.resolve_display_name();
 
         Ok(Self {
             conn,
@@ -161,16 +167,19 @@ impl LockApp {
             session_lock: None,
             xdg_shell,
             keyboard: None,
+            pointer: None,
+            cursor_pos: (0.0, 0.0),
             surfaces: HashMap::new(),
             cfg,
             ui,
             auth_worker,
             auth_state: AuthState::Idle,
+            display_name,
             password: Zeroizing::new(String::new()),
+            reveal_password: false,
             glide,
             shake: ShakeAnimation::new(),
             capslock: false,
-            layout_index: 0,
             is_windowed,
             dev_escape,
             target_monitor,
@@ -338,13 +347,12 @@ impl LockApp {
             None => return,
         };
 
-        let layout_name = if self.layout_index == 1 { "RU" } else { "US" };
         let state = CardUiState {
-            username: &self.cfg.user.default,
-            display_name: self.cfg.user.display_name.as_deref(),
+            display_name: &self.display_name,
             password_len: self.password.len(),
+            password_text: &self.password,
+            reveal_password: self.reveal_password,
             capslock: self.capslock,
-            layout: layout_name,
             error: self.auth_state == AuthState::Failure,
             glide: &self.glide,
             shake: &self.shake,
@@ -374,6 +382,54 @@ impl LockApp {
         let secret = Zeroizing::new(self.password.to_string());
         self.auth_worker
             .submit(self.cfg.user.default.clone(), secret);
+    }
+
+    fn update_cursor_glide(&mut self) {
+        let target_x = self.ui.compute_dot_x_offset(
+            &self.cfg,
+            self.password.len(),
+            &self.password,
+            self.reveal_password,
+        );
+        self.glide.set_target(target_x);
+        self.redraw_all();
+    }
+
+    pub fn handle_key(&mut self, event: KeyEvent) {
+        match event.keysym {
+            Keysym::Return | Keysym::KP_Enter => {
+                self.submit_auth();
+            }
+            Keysym::Escape => {
+                if self.dev_escape || self.is_windowed {
+                    self.unlock_and_exit();
+                    return;
+                }
+                self.password.zeroize();
+                self.password.clear();
+                self.auth_state = AuthState::Idle;
+                self.update_cursor_glide();
+            }
+            Keysym::BackSpace => {
+                if self.auth_state != AuthState::Verifying && !self.password.is_empty() {
+                    self.password.pop();
+                    self.auth_state = AuthState::Idle;
+                    self.update_cursor_glide();
+                }
+            }
+            _ => {
+                if self.auth_state != AuthState::Verifying
+                    && let Some(utf8) = event.utf8
+                {
+                    let filtered: String = utf8.chars().filter(|c| !c.is_control()).collect();
+                    if !filtered.is_empty() {
+                        self.password.push_str(&filtered);
+                        self.auth_state = AuthState::Idle;
+                        self.update_cursor_glide();
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -451,9 +507,24 @@ impl SeatHandler for LockApp {
     ) {
         if cap == Capability::Keyboard
             && self.keyboard.is_none()
-            && let Ok(kbd) = self.seat_state.get_keyboard(qh, &seat, None)
+            && let Ok(kbd) = self.seat_state.get_keyboard_with_repeat(
+                qh,
+                &seat,
+                None,
+                self.loop_handle.clone(),
+                Box::new(|app: &mut LockApp, _kbd, event| {
+                    app.handle_key(event);
+                }),
+            )
         {
             self.keyboard = Some(kbd);
+        }
+
+        if cap == Capability::Pointer
+            && self.pointer.is_none()
+            && let Ok(ptr) = self.seat_state.get_pointer(qh, &seat)
+        {
+            self.pointer = Some(ptr);
         }
     }
 
@@ -468,6 +539,12 @@ impl SeatHandler for LockApp {
             && let Some(kbd) = self.keyboard.take()
         {
             kbd.release();
+        }
+
+        if cap == Capability::Pointer
+            && let Some(ptr) = self.pointer.take()
+        {
+            ptr.release();
         }
     }
 
@@ -506,57 +583,18 @@ impl KeyboardHandler for LockApp {
         _serial: u32,
         event: KeyEvent,
     ) {
-        match event.keysym {
-            Keysym::Return | Keysym::KP_Enter => {
-                self.submit_auth();
-            }
-            Keysym::Escape => {
-                if self.dev_escape || self.is_windowed {
-                    self.unlock_and_exit();
-                    return;
-                }
-                self.password.zeroize();
-                self.password.clear();
-                let target_x = self.ui.compute_dot_x_offset(&self.cfg, 0);
-                self.glide.set_target(target_x);
-                self.auth_state = AuthState::Idle;
-                self.redraw_all();
-            }
-            Keysym::BackSpace => {
-                if self.auth_state != AuthState::Verifying && !self.password.is_empty() {
-                    self.password.pop();
-                    let target_x = self.ui.compute_dot_x_offset(&self.cfg, self.password.len());
-                    self.glide.set_target(target_x);
-                    self.auth_state = AuthState::Idle;
-                    self.redraw_all();
-                }
-            }
-            _ => {
-                if self.auth_state != AuthState::Verifying
-                    && let Some(utf8) = event.utf8
-                {
-                    let filtered: String = utf8.chars().filter(|c| !c.is_control()).collect();
-                    if !filtered.is_empty() {
-                        self.password.push_str(&filtered);
-                        let target_x = self.ui.compute_dot_x_offset(&self.cfg, self.password.len());
-                        self.glide.set_target(target_x);
-                        self.auth_state = AuthState::Idle;
-                        self.redraw_all();
-                    }
-                }
-            }
-        }
+        self.handle_key(event);
     }
 
     fn repeat_key(
         &mut self,
-        conn: &Connection,
-        qh: &QueueHandle<Self>,
-        keyboard: &wl_keyboard::WlKeyboard,
-        serial: u32,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _serial: u32,
         event: KeyEvent,
     ) {
-        self.press_key(conn, qh, keyboard, serial, event);
+        self.handle_key(event);
     }
 
     fn release_key(
@@ -577,13 +615,84 @@ impl KeyboardHandler for LockApp {
         _serial: u32,
         modifiers: Modifiers,
         _raw: smithay_client_toolkit::seat::keyboard::RawModifiers,
-        layout: u32,
+        _layout: u32,
     ) {
-        let changed = self.capslock != modifiers.caps_lock || self.layout_index != layout;
+        let changed = self.capslock != modifiers.caps_lock;
         self.capslock = modifiers.caps_lock;
-        self.layout_index = layout;
         if changed {
             self.redraw_all();
+        }
+    }
+}
+
+impl PointerHandler for LockApp {
+    fn pointer_frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _pointer: &wl_pointer::WlPointer,
+        events: &[PointerEvent],
+    ) {
+        for event in events {
+            match event.kind {
+                PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
+                    self.cursor_pos = event.position;
+                }
+                PointerEventKind::Press { button: 0x110, .. } => {
+                    let (px, py) = (self.cursor_pos.0 as f32, self.cursor_pos.1 as f32);
+                    self.handle_pointer_click(px, py);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+impl LockApp {
+    fn handle_pointer_click(&mut self, px: f32, py: f32) {
+        let primary_view = self.surfaces.values().find(|v| v.is_primary);
+        let (screen_w, screen_h) = match primary_view {
+            Some(v) => (v.width as f32, v.height as f32),
+            None => (1920.0, 1080.0),
+        };
+
+        let card_w = self.cfg.card.width;
+        let card_h = compute_card_height(&self.cfg, self.capslock);
+        let card_x = ((screen_w - card_w) / 2.0).round();
+        let card_y = ((screen_h - card_h) / 2.0).round();
+
+        let input_w = card_w - (self.cfg.card.padding_x * 2.0);
+        let input_h = self.cfg.input.height;
+        let input_x = card_x + self.cfg.card.padding_x;
+        let mut input_y = card_y + self.cfg.card.padding_y;
+        if self.cfg.card.show_avatar {
+            input_y += self.cfg.card.avatar_size + 14.0;
+        }
+        input_y += 34.0;
+
+        let input_rect = match tiny_skia::Rect::from_xywh(input_x, input_y, input_w, input_h) {
+            Some(r) => r,
+            None => return,
+        };
+
+        let (peek_rect, submit_rect) = get_buttons_geometry(input_rect);
+
+        if peek_rect.x() <= px
+            && px <= peek_rect.x() + peek_rect.width()
+            && peek_rect.y() <= py
+            && py <= peek_rect.y() + peek_rect.height()
+        {
+            self.reveal_password = !self.reveal_password;
+            self.update_cursor_glide();
+            return;
+        }
+
+        if submit_rect.x() <= px
+            && px <= submit_rect.x() + submit_rect.width()
+            && submit_rect.y() <= py
+            && py <= submit_rect.y() + submit_rect.height()
+        {
+            self.submit_auth();
         }
     }
 }
