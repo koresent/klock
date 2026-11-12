@@ -4,8 +4,8 @@ use crate::config::{Config, parse_color};
 use crate::render::animations::{CursorGlideState, ShakeAnimation};
 use crate::render::text::FontRenderer;
 use tiny_skia::{
-    Color, FillRule, LineCap, Paint, PathBuilder, Pixmap, PixmapMut, PixmapPaint, Rect, Stroke,
-    Transform,
+    Color, FillRule, GradientStop, LineCap, LinearGradient, Paint, PathBuilder, Pixmap, PixmapMut,
+    PixmapPaint, Point, Rect, SpreadMode, Stroke, Transform,
 };
 
 pub struct CardUiState<'a> {
@@ -15,6 +15,7 @@ pub struct CardUiState<'a> {
     pub reveal_password: bool,
     pub hover_peek: bool,
     pub hover_submit: bool,
+    pub input_focused: bool,
     pub capslock: bool,
     pub error: bool,
     pub fade_opacity: f32,
@@ -457,16 +458,26 @@ impl UiRenderer {
         // Matching kgreet: input has accent_color (#b8bb26) border when focused
         let border_color = if state.error {
             parse_color(&cfg.appearance.error_color, 0.95)
-        } else if let Some(ref c) = cfg.input.focus_border_color {
-            parse_color(c, 1.0)
+        } else if state.input_focused {
+            if let Some(ref c) = cfg.input.focus_border_color {
+                parse_color(c, 1.0)
+            } else {
+                parse_color(&cfg.appearance.accent_color, 1.0)
+            }
         } else {
-            parse_color(&cfg.appearance.accent_color, 1.0)
+            parse_color(&cfg.input.border_color, cfg.input.border_opacity)
         };
         let mut border_paint = Paint::default();
         border_paint.set_color(border_color);
         border_paint.anti_alias = true;
         let stroke = Stroke {
-            width: if state.error { 2.0 } else { 1.5 },
+            width: if state.error {
+                2.0
+            } else if state.input_focused {
+                1.5
+            } else {
+                1.0
+            },
             ..Default::default()
         };
         target.stroke_path(&path, &border_paint, &stroke, Transform::identity(), None);
@@ -494,7 +505,7 @@ impl UiRenderer {
             self.font.draw_text_clipped(
                 target,
                 &cfg.input.placeholder,
-                text_start_x + 8.0,
+                text_start_x + 6.0,
                 baseline_y,
                 14.0,
                 placeholder_color,
@@ -532,7 +543,7 @@ impl UiRenderer {
             }
         }
 
-        if cfg.input.cursor_glide.enabled {
+        if cfg.input.cursor_glide.enabled && state.input_focused {
             self.draw_cursor_glide(
                 target,
                 cfg,
@@ -595,23 +606,42 @@ impl UiRenderer {
 
         let rel_cursor = (state.glide.cur_x - scroll_x).clamp(0.0, max_text_w);
         let glide_x = base_x + rel_cursor;
-        let cursor_color = parse_color(&cfg.input.cursor_glide.color, 0.95);
+        let alpha = 0.96;
+        let cursor_color = parse_color(&cfg.input.cursor_glide.color, alpha);
 
         if let Some((smear_left, smear_w)) = state.glide.current_smear {
             let rel_left = (smear_left - scroll_x).max(0.0);
             let rel_right =
                 (smear_left + smear_w - scroll_x).min(max_text_w + cfg.input.cursor_glide.width);
-            let clamped_w = (rel_right - rel_left).max(0.0);
-            if clamped_w > cfg.input.cursor_glide.width
-                && let Some(smear_rect) =
-                    Rect::from_xywh(base_x + rel_left, cursor_y, clamped_w, cursor_h)
+            let clamped_w = (rel_right - rel_left).max(cfg.input.cursor_glide.width);
+            if let Some(smear_rect) =
+                Rect::from_xywh(base_x + rel_left, cursor_y, clamped_w, cursor_h)
             {
-                let smear_color = parse_color(
-                    &cfg.input.cursor_glide.color,
-                    0.35 * cfg.input.cursor_glide.trail_smear,
-                );
-                let mut smear_paint = Paint::default();
-                smear_paint.set_color(smear_color);
+                let tail_color = parse_color(&cfg.input.cursor_glide.color, 0.75 * alpha);
+                let moving_right = state.glide.target_x >= state.glide.prev_x;
+                let (start_x, end_x) = if moving_right {
+                    (smear_rect.x(), smear_rect.x() + smear_rect.width())
+                } else {
+                    (smear_rect.x() + smear_rect.width(), smear_rect.x())
+                };
+                let mut smear_paint = Paint {
+                    anti_alias: true,
+                    ..Default::default()
+                };
+                if let Some(shader) = LinearGradient::new(
+                    Point::from_xy(start_x, cursor_y),
+                    Point::from_xy(end_x, cursor_y),
+                    vec![
+                        GradientStop::new(0.0, tail_color),
+                        GradientStop::new(1.0, cursor_color),
+                    ],
+                    SpreadMode::Pad,
+                    Transform::identity(),
+                ) {
+                    smear_paint.shader = shader;
+                } else {
+                    smear_paint.set_color(cursor_color);
+                }
                 let smear_path =
                     rounded_rect_path(smear_rect, cfg.input.cursor_glide.corner_radius);
                 target.fill_path(
@@ -621,13 +651,17 @@ impl UiRenderer {
                     Transform::identity(),
                     None,
                 );
+                return;
             }
         }
 
         if let Some(cursor_rect) =
             Rect::from_xywh(glide_x, cursor_y, cfg.input.cursor_glide.width, cursor_h)
         {
-            let mut cursor_paint = Paint::default();
+            let mut cursor_paint = Paint {
+                anti_alias: true,
+                ..Default::default()
+            };
             cursor_paint.set_color(cursor_color);
             let cursor_path = rounded_rect_path(cursor_rect, cfg.input.cursor_glide.corner_radius);
             target.fill_path(
@@ -846,6 +880,7 @@ fn draw_adwaita_eye_icon(target: &mut PixmapMut, rect: Rect, revealed: bool, col
 fn rounded_rect_path(rect: Rect, radius: f32) -> tiny_skia::Path {
     let mut pb = PathBuilder::new();
     let r = radius.min(rect.width() / 2.0).min(rect.height() / 2.0);
+    let k = r * 0.552_284_8;
 
     let x = rect.x();
     let y = rect.y();
@@ -854,13 +889,13 @@ fn rounded_rect_path(rect: Rect, radius: f32) -> tiny_skia::Path {
 
     pb.move_to(x + r, y);
     pb.line_to(x + w - r, y);
-    pb.quad_to(x + w, y, x + w, y + r);
+    pb.cubic_to(x + w - r + k, y, x + w, y + r - k, x + w, y + r);
     pb.line_to(x + w, y + h - r);
-    pb.quad_to(x + w, y + h, x + w - r, y + h);
+    pb.cubic_to(x + w, y + h - r + k, x + w - r + k, y + h, x + w - r, y + h);
     pb.line_to(x + r, y + h);
-    pb.quad_to(x, y + h, x, y + h - r);
+    pb.cubic_to(x + r - k, y + h, x, y + h - r + k, x, y + h - r);
     pb.line_to(x, y + r);
-    pb.quad_to(x, y, x + r, y);
+    pb.cubic_to(x, y + r - k, x + r - k, y, x + r, y);
     pb.close();
 
     pb.finish().unwrap()
@@ -950,6 +985,7 @@ mod tests {
             reveal_password: true,
             hover_peek: true,
             hover_submit: true,
+            input_focused: true,
             capslock: true,
             error: false,
             fade_opacity: 1.0,

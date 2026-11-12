@@ -204,9 +204,9 @@ impl FontRenderer {
 
                 let out_a = alpha_f + dst_a * (1.0 - alpha_f);
                 if out_a > 0.001 {
-                    let out_r = (cr * alpha_f + dst_r * dst_a * (1.0 - alpha_f)) / out_a;
-                    let out_g = (cg * alpha_f + dst_g * dst_a * (1.0 - alpha_f)) / out_a;
-                    let out_b = (cb * alpha_f + dst_b * dst_a * (1.0 - alpha_f)) / out_a;
+                    let out_r = cr * alpha_f + dst_r * (1.0 - alpha_f);
+                    let out_g = cg * alpha_f + dst_g * (1.0 - alpha_f);
+                    let out_b = cb * alpha_f + dst_b * (1.0 - alpha_f);
 
                     buf[pixel_idx] = (out_r.clamp(0.0, 1.0) * 255.0) as u8;
                     buf[pixel_idx + 1] = (out_g.clamp(0.0, 1.0) * 255.0) as u8;

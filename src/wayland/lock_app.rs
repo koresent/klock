@@ -81,6 +81,7 @@ pub struct LockApp {
     pub current_cursor: CursorIcon,
     pub hover_peek: bool,
     pub hover_submit: bool,
+    pub input_focused: bool,
     pub surfaces: HashMap<u32, SurfaceView>,
 
     pub cfg: Config,
@@ -177,6 +178,7 @@ impl LockApp {
             current_cursor: CursorIcon::Default,
             hover_peek: false,
             hover_submit: false,
+            input_focused: true,
             surfaces: HashMap::new(),
             cfg,
             ui,
@@ -400,6 +402,7 @@ impl LockApp {
             reveal_password: self.reveal_password,
             hover_peek: self.hover_peek,
             hover_submit: self.hover_submit,
+            input_focused: self.input_focused,
             capslock: self.capslock,
             error: self.auth_state == AuthState::Failure,
             fade_opacity: self.fade.opacity(),
@@ -451,6 +454,7 @@ impl LockApp {
     }
 
     pub fn handle_key(&mut self, event: KeyEvent) {
+        self.input_focused = true;
         match event.keysym {
             Keysym::Return | Keysym::KP_Enter => {
                 self.submit_auth();
@@ -626,6 +630,10 @@ impl KeyboardHandler for LockApp {
         _raw: &[u32],
         _keysyms: &[Keysym],
     ) {
+        if !self.input_focused {
+            self.input_focused = true;
+            self.redraw_all();
+        }
     }
 
     fn leave(
@@ -636,6 +644,10 @@ impl KeyboardHandler for LockApp {
         _surface: &wl_surface::WlSurface,
         _serial: u32,
     ) {
+        if self.input_focused {
+            self.input_focused = false;
+            self.redraw_all();
+        }
     }
 
     fn press_key(
@@ -787,18 +799,27 @@ impl LockApp {
     }
 
     fn handle_pointer_click(&mut self, px: f32, py: f32) {
-        let Some((_input_rect, peek_rect, submit_rect)) = self.compute_card_rects() else {
+        let Some((input_rect, peek_rect, submit_rect)) = self.compute_card_rects() else {
             return;
         };
 
         if self.cfg.input.show_peek_icon && rect_contains(peek_rect, px, py) {
+            self.input_focused = true;
             self.reveal_password = !self.reveal_password;
             self.update_cursor_glide();
             return;
         }
 
         if rect_contains(submit_rect, px, py) {
+            self.input_focused = true;
             self.submit_auth();
+            return;
+        }
+
+        let new_focus = rect_contains(input_rect, px, py);
+        if self.input_focused != new_focus {
+            self.input_focused = new_focus;
+            self.redraw_all();
         }
     }
 }
