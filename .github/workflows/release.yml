@@ -36,7 +36,9 @@ jobs:
             file \
             clang \
             libclang-dev \
-            libpam0g-dev
+            libpam0g-dev \
+            libxkbcommon-dev \
+            libwayland-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

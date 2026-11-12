@@ -2,6 +2,9 @@
 
 Wayland session lockscreen written in Rust using `ext-session-lock-v1` and `tiny-skia`, matching `kgreet` styling.
 
+> [!NOTE]
+> `klock` is designed to pair seamlessly with [`kgreet`](https://github.com/koresent/kgreet) for a unified login-to-lockscreen experience — sharing the same visual design, animations, and configuration style (and falling back to `~/.config/kgreet/config.yaml` automatically).
+
 ![klock preview](assets/preview.webp)
 
 ## Features
