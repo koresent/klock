@@ -60,7 +60,7 @@ impl UiRenderer {
         let target_w = target.width();
         let target_h = target.height();
 
-        // 1. Fast wallpaper blit via SIMD memcpy (zero software alpha-blending overhead)
+        // Direct memcpy avoids software alpha-blending across large surfaces.
         if let Some(ref wall_img) = self.source_wallpaper {
             let key = (target_w, target_h);
             if !self.cached_wallpapers.contains_key(&key)
@@ -591,7 +591,8 @@ impl UiRenderer {
 
         if let Some((smear_left, smear_w)) = state.glide.current_smear {
             let rel_left = (smear_left - scroll_x).max(0.0);
-            let rel_right = (smear_left + smear_w - scroll_x).min(max_text_w + cfg.input.cursor_glide.width);
+            let rel_right =
+                (smear_left + smear_w - scroll_x).min(max_text_w + cfg.input.cursor_glide.width);
             let clamped_w = (rel_right - rel_left).max(0.0);
             if clamped_w > cfg.input.cursor_glide.width
                 && let Some(smear_rect) =
@@ -697,7 +698,7 @@ fn draw_adwaita_eye_icon(target: &mut PixmapMut, rect: Rect, revealed: bool, col
 
     let mut pb = PathBuilder::new();
 
-    // 1. Outer eye contour
+    // Adwaita view-reveal-symbolic uses EvenOdd fill across contour, cutout ring, and pupil.
     pb.move_to(sx + 8.0 * s, sy + 2.0 * s);
     pb.cubic_to(
         sx + 4.3515 * s,
@@ -733,7 +734,6 @@ fn draw_adwaita_eye_icon(target: &mut PixmapMut, rect: Rect, revealed: bool, col
     );
     pb.close();
 
-    // 2. Middle cutout circle (r=4 at 8,8)
     pb.move_to(sx + 8.0 * s, sy + 4.0 * s);
     pb.cubic_to(
         sx + 10.2109 * s,
@@ -769,7 +769,6 @@ fn draw_adwaita_eye_icon(target: &mut PixmapMut, rect: Rect, revealed: bool, col
     );
     pb.close();
 
-    // 3. Inner pupil circle (r=2 at 8,8)
     pb.move_to(sx + 8.0 * s, sy + 6.0 * s);
     pb.cubic_to(
         sx + 6.8945 * s,
@@ -809,7 +808,13 @@ fn draw_adwaita_eye_icon(target: &mut PixmapMut, rect: Rect, revealed: bool, col
         let mut paint = Paint::default();
         paint.set_color(color);
         paint.anti_alias = true;
-        target.fill_path(&path, &paint, FillRule::EvenOdd, Transform::identity(), None);
+        target.fill_path(
+            &path,
+            &paint,
+            FillRule::EvenOdd,
+            Transform::identity(),
+            None,
+        );
     }
 
     if revealed {
@@ -880,4 +885,70 @@ pub fn format_local_time(fmt: &str) -> String {
         return String::new();
     }
     String::from_utf8_lossy(&buf[..len]).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compute_card_height_varies_with_capslock_and_avatar() {
+        let mut cfg = Config::default();
+        let h_base = compute_card_height(&cfg, false);
+        let h_caps = compute_card_height(&cfg, true);
+        assert!(h_caps > h_base);
+
+        cfg.card.show_avatar = false;
+        let h_no_avatar = compute_card_height(&cfg, false);
+        assert!(h_no_avatar < h_base);
+    }
+
+    #[test]
+    fn test_compute_input_row_geometry_within_card() {
+        let cfg = Config::default();
+        let card_rect = Rect::from_xywh(100.0, 100.0, cfg.card.width, 240.0).unwrap();
+        let (input_rect, peek_rect, submit_rect) =
+            compute_input_row_geometry(card_rect, &cfg, 180.0);
+
+        assert!(input_rect.x() >= card_rect.x());
+        assert!(submit_rect.x() > input_rect.x() + input_rect.width());
+        assert!(submit_rect.x() + submit_rect.width() <= card_rect.x() + card_rect.width());
+        assert!(peek_rect.x() > input_rect.x());
+        assert!(peek_rect.x() + peek_rect.width() <= input_rect.x() + input_rect.width());
+    }
+
+    #[test]
+    fn test_format_local_time_non_empty() {
+        let t = format_local_time("%H:%M");
+        assert_eq!(t.len(), 5);
+        assert!(t.contains(':'));
+    }
+
+    #[test]
+    fn test_render_frame_smoke() {
+        let mut renderer = UiRenderer::new().expect("Font load failed");
+        let cfg = Config::default();
+        let glide = CursorGlideState::new(150);
+        let shake = ShakeAnimation::new();
+
+        let mut pixmap = Pixmap::new(1280, 720).unwrap();
+        let mut pm = pixmap.as_mut();
+
+        let long_utf8 = "\u{043f}\u{0430}\u{0440}\u{043e}\u{043b}\u{044c}_very_long_password_string_1234567890_overflow_test";
+        let state = CardUiState {
+            display_name: "Test User",
+            password_len: long_utf8.chars().count(),
+            password_text: long_utf8,
+            reveal_password: true,
+            hover_peek: true,
+            hover_submit: true,
+            capslock: true,
+            error: false,
+            glide: &glide,
+            shake: &shake,
+        };
+
+        renderer.render_frame(&mut pm, &cfg, &state, true);
+        assert!(pixmap.data().iter().any(|&b| b != 0));
+    }
 }

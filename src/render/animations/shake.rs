@@ -43,3 +43,18 @@ impl ShakeAnimation {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shake_idle_and_trigger() {
+        let mut shake = ShakeAnimation::new();
+        assert!(!shake.is_active());
+        assert_eq!(shake.offset_x(), 0.0);
+
+        shake.trigger();
+        assert!(shake.is_active());
+    }
+}

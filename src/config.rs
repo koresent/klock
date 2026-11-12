@@ -451,7 +451,11 @@ fn read_os_name() -> String {
 }
 
 fn read_session_name() -> String {
-    for var in ["XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP", "DESKTOP_SESSION"] {
+    for var in [
+        "XDG_CURRENT_DESKTOP",
+        "XDG_SESSION_DESKTOP",
+        "DESKTOP_SESSION",
+    ] {
         if let Ok(val) = std::env::var(var)
             && !val.trim().is_empty()
         {
@@ -613,5 +617,56 @@ mod tests {
         assert!((c.red() - 0.72).abs() < 0.05);
         assert!((c.green() - 0.73).abs() < 0.05);
         assert_eq!(c.alpha(), 1.0);
+
+        let short = parse_color("#fff", 0.5);
+        assert_eq!(short.red(), 1.0);
+        assert_eq!(short.alpha(), 0.5);
+
+        let fallback = parse_color("invalid", 2.0);
+        assert_eq!(fallback.alpha(), 1.0);
+    }
+
+    #[test]
+    fn test_clock_config_and_subtitle() {
+        let yaml = r#"
+clock:
+  enabled: false
+  position: "top-left"
+  time_format: "%H:%M:%S"
+  date_format: "%d.%m.%Y"
+  subtitle: "{user}@{host} ({os})"
+  time_bold: true
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("YAML parse failed");
+        assert!(!cfg.clock.enabled);
+        assert_eq!(cfg.clock.position, "top-left");
+        assert_eq!(cfg.clock.time_format, "%H:%M:%S");
+        assert!(cfg.clock.time_bold);
+
+        let sub = cfg.clock.resolve_subtitle("alice").unwrap();
+        assert!(sub.starts_with("alice@"));
+
+        let empty_clock = ClockConfig {
+            subtitle: Some("   ".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(empty_clock.resolve_subtitle("alice"), None);
+    }
+
+    #[test]
+    fn test_resolve_display_name() {
+        let u = UserConfig {
+            default: "nonexistent_user_123".to_string(),
+            show_display_name: true,
+            display_name: Some("  Custom Name  ".to_string()),
+        };
+        assert_eq!(u.resolve_display_name(), "Custom Name");
+
+        let u_fallback = UserConfig {
+            default: "nonexistent_user_123".to_string(),
+            show_display_name: true,
+            display_name: None,
+        };
+        assert_eq!(u_fallback.resolve_display_name(), "nonexistent_user_123");
     }
 }

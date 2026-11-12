@@ -146,3 +146,35 @@ impl Drop for AuthWorker {
         let _ = self.request_tx.send(AuthRequest::Shutdown);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mock_auth_worker() {
+        let worker = AuthWorker::spawn(true);
+
+        worker.submit("user".into(), Zeroizing::new("test".into()));
+        let mut resp = None;
+        for _ in 0..50 {
+            if let Some(r) = worker.try_recv() {
+                resp = Some(r);
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(matches!(resp, Some(AuthResponse::Success)));
+
+        worker.submit("user".into(), Zeroizing::new("wrong_pass".into()));
+        let mut fail_resp = None;
+        for _ in 0..50 {
+            if let Some(r) = worker.try_recv() {
+                fail_resp = Some(r);
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(matches!(fail_resp, Some(AuthResponse::Failure(_))));
+    }
+}

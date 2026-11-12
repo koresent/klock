@@ -14,7 +14,9 @@ use smithay_client_toolkit::{
     seat::{
         Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
-        pointer::{CursorIcon, PointerEvent, PointerEventKind, PointerHandler, ThemeSpec, ThemedPointer},
+        pointer::{
+            CursorIcon, PointerEvent, PointerEventKind, PointerHandler, ThemeSpec, ThemedPointer,
+        },
     },
     session_lock::{
         SessionLock, SessionLockHandler, SessionLockState, SessionLockSurface,
@@ -879,7 +881,8 @@ impl OutputHandler for LockApp {
         _qh: &QueueHandle<Self>,
         output: wl_output::WlOutput,
     ) {
-        self.surfaces.retain(|_, v| v.output.as_ref() != Some(&output));
+        self.surfaces
+            .retain(|_, v| v.output.as_ref() != Some(&output));
     }
 }
 
