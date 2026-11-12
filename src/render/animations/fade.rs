@@ -2,6 +2,7 @@ use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FadePhase {
+    PendingFadeIn,
     FadeIn,
     Visible,
     FadeOut,
@@ -19,12 +20,19 @@ impl FadeAnimation {
     pub fn new(enabled: bool, duration_ms: u64) -> Self {
         Self {
             phase: if enabled {
-                FadePhase::FadeIn
+                FadePhase::PendingFadeIn
             } else {
                 FadePhase::Visible
             },
             start_time: Instant::now(),
             duration_secs: (duration_ms.max(20) as f32) / 1000.0,
+        }
+    }
+
+    pub fn start_fade_in(&mut self) {
+        if self.phase == FadePhase::PendingFadeIn {
+            self.phase = FadePhase::FadeIn;
+            self.start_time = Instant::now();
         }
     }
 
@@ -42,6 +50,7 @@ impl FadeAnimation {
 
     pub fn update(&mut self) -> bool {
         match self.phase {
+            FadePhase::PendingFadeIn => false,
             FadePhase::FadeIn => {
                 if self.start_time.elapsed().as_secs_f32() >= self.duration_secs {
                     self.phase = FadePhase::Visible;
@@ -60,10 +69,11 @@ impl FadeAnimation {
 
     pub fn opacity(&self) -> f32 {
         match self.phase {
+            FadePhase::PendingFadeIn => 0.0,
             FadePhase::FadeIn => {
                 let t =
                     (self.start_time.elapsed().as_secs_f32() / self.duration_secs).clamp(0.0, 1.0);
-                1.0 - (1.0 - t).powi(3)
+                1.0 - (1.0 - t).powi(2)
             }
             FadePhase::Visible => 1.0,
             FadePhase::FadeOut => {
@@ -83,6 +93,11 @@ mod tests {
     #[test]
     fn test_fade_in_and_out_lifecycle() {
         let mut fade = FadeAnimation::new(true, 30);
+        assert_eq!(fade.phase, FadePhase::PendingFadeIn);
+        assert_eq!(fade.opacity(), 0.0);
+        assert!(!fade.update());
+
+        fade.start_fade_in();
         assert_eq!(fade.phase, FadePhase::FadeIn);
         assert!(fade.opacity() <= 1.0);
 

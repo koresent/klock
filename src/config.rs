@@ -8,6 +8,8 @@ pub struct Config {
     #[serde(default)]
     pub user: UserConfig,
     #[serde(default)]
+    pub monitor: MonitorConfig,
+    #[serde(default)]
     pub card: CardConfig,
     #[serde(default)]
     pub input: InputConfig,
@@ -67,6 +69,24 @@ impl Default for UserConfig {
 
 fn default_user() -> String {
     std::env::var("USER").unwrap_or_else(|_| "user".to_string())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonitorConfig {
+    #[serde(default = "default_monitor_target")]
+    pub target: String,
+}
+
+fn default_monitor_target() -> String {
+    "primary".to_string()
+}
+
+impl Default for MonitorConfig {
+    fn default() -> Self {
+        Self {
+            target: default_monitor_target(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -668,5 +688,18 @@ clock:
             display_name: None,
         };
         assert_eq!(u_fallback.resolve_display_name(), "nonexistent_user_123");
+    }
+
+    #[test]
+    fn test_monitor_config_parsing() {
+        let yaml = r#"
+monitor:
+  target: "DP-2"
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("YAML parse failed");
+        assert_eq!(cfg.monitor.target, "DP-2");
+
+        let default_cfg = Config::default();
+        assert_eq!(default_cfg.monitor.target, "primary");
     }
 }

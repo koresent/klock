@@ -12,6 +12,10 @@ user:
   # Explicit display name override; null reads AccountsService RealName or /etc/passwd GECOS.
   display_name: null
 
+monitor:
+  # "primary" selects the primary/landscape display; or specify a connector name (e.g. "DP-2").
+  target: primary
+
 clock:
   enabled: true
   # "top-center", "center", "top-left", "top-right"

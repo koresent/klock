@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
-    output::{OutputHandler, OutputInfo, OutputState},
+    output::{OutputHandler, OutputState},
     reexports::calloop::{
         LoopHandle,
         timer::{TimeoutAction, Timer},
@@ -189,7 +189,7 @@ impl LockApp {
             reveal_password: false,
             glide,
             shake: ShakeAnimation::new(),
-            fade: FadeAnimation::new(true, 220),
+            fade: FadeAnimation::new(true, 250),
             capslock: false,
             is_windowed,
             dev_escape,
@@ -264,9 +264,6 @@ impl LockApp {
         let surface = self.compositor_state.create_surface(qh);
         let lock_surface = lock.create_lock_surface(surface.clone(), output, qh);
 
-        let info = self.output_state.info(output);
-        let is_primary = self.is_target_output(info.as_ref());
-
         let pool = SlotPool::new(1920 * 1080 * 4, &self.shm)?;
         let id = surface.id().protocol_id();
 
@@ -279,7 +276,7 @@ impl LockApp {
                 window: None,
                 width: 1920,
                 height: 1080,
-                is_primary,
+                is_primary: false,
                 has_drawn: false,
                 frame_pending: false,
                 needs_redraw: false,
@@ -287,18 +284,69 @@ impl LockApp {
             },
         );
 
+        self.update_primary_surface();
         Ok(())
     }
 
-    fn is_target_output(&self, info: Option<&OutputInfo>) -> bool {
-        let name = info.and_then(|i| i.name.as_deref()).unwrap_or("");
-        if let Some(ref target) = self.target_monitor {
-            if target == "primary" {
-                return name == "DP-2" || name.starts_with("eDP") || self.surfaces.is_empty();
-            }
-            return name == target;
+    pub fn update_primary_surface(&mut self) {
+        if self.surfaces.is_empty() {
+            return;
         }
-        name == "DP-2" || self.surfaces.is_empty()
+
+        let target_str = self
+            .target_monitor
+            .as_deref()
+            .unwrap_or(self.cfg.monitor.target.as_str())
+            .trim();
+
+        let mut matched_id = None;
+
+        if !target_str.is_empty() && !target_str.eq_ignore_ascii_case("primary") {
+            for (id, view) in &self.surfaces {
+                if let Some(ref out) = view.output
+                    && let Some(info) = self.output_state.info(out)
+                    && let Some(ref name) = info.name
+                    && name.eq_ignore_ascii_case(target_str)
+                {
+                    matched_id = Some(*id);
+                    break;
+                }
+            }
+        }
+
+        if matched_id.is_none() {
+            for (id, view) in &self.surfaces {
+                let is_landscape = if view.width > 0 && view.height > 0 {
+                    view.width >= view.height
+                } else if let Some(ref out) = view.output
+                    && let Some(info) = self.output_state.info(out)
+                    && let Some(mode) = info.modes.iter().find(|m| m.current)
+                {
+                    mode.dimensions.0 >= mode.dimensions.1
+                } else {
+                    false
+                };
+
+                if is_landscape {
+                    matched_id = Some(*id);
+                    break;
+                }
+            }
+        }
+
+        if matched_id.is_none() {
+            matched_id = self.surfaces.keys().next().copied();
+        }
+
+        let chosen_id = matched_id;
+        for (id, view) in self.surfaces.iter_mut() {
+            let should_be_primary = Some(*id) == chosen_id;
+            if view.is_primary != should_be_primary {
+                view.is_primary = should_be_primary;
+                view.has_drawn = false;
+                view.needs_redraw = true;
+            }
+        }
     }
 
     fn schedule_animation_timer(&self) {
@@ -494,6 +542,8 @@ impl LockApp {
 
 impl SessionLockHandler for LockApp {
     fn locked(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _session_lock: SessionLock) {
+        self.update_primary_surface();
+        self.fade.start_fade_in();
         self.redraw_all();
     }
 
@@ -523,6 +573,8 @@ impl SessionLockHandler for LockApp {
             view.height = h;
             view.has_drawn = false;
         }
+        self.update_primary_surface();
+        self.fade.start_fade_in();
         self.redraw_surface(id);
     }
 }
@@ -550,6 +602,8 @@ impl WindowHandler for LockApp {
                 view.has_drawn = false;
             }
         }
+        self.update_primary_surface();
+        self.fade.start_fade_in();
         self.redraw_all();
     }
 }
@@ -894,6 +948,7 @@ impl OutputHandler for LockApp {
     ) {
         if !self.is_windowed && self.session_lock.is_some() {
             let _ = self.create_lock_surface_for_output(&output, qh);
+            self.update_primary_surface();
         }
     }
 
@@ -903,6 +958,8 @@ impl OutputHandler for LockApp {
         _qh: &QueueHandle<Self>,
         _output: wl_output::WlOutput,
     ) {
+        self.update_primary_surface();
+        self.redraw_all();
     }
 
     fn output_destroyed(
@@ -913,6 +970,8 @@ impl OutputHandler for LockApp {
     ) {
         self.surfaces
             .retain(|_, v| v.output.as_ref() != Some(&output));
+        self.update_primary_surface();
+        self.redraw_all();
     }
 }
 
