@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
+    compositor::{CompositorHandler, CompositorState, FrameCallbackData},
     output::{OutputHandler, OutputInfo, OutputState},
     reexports::calloop::{
         LoopHandle,
@@ -14,7 +14,7 @@ use smithay_client_toolkit::{
     seat::{
         Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
-        pointer::{PointerEvent, PointerEventKind, PointerHandler},
+        pointer::{CursorIcon, PointerEvent, PointerEventKind, PointerHandler, ThemeSpec, ThemedPointer},
     },
     session_lock::{
         SessionLock, SessionLockHandler, SessionLockState, SessionLockSurface,
@@ -54,11 +54,14 @@ pub struct SurfaceView {
     pub height: u32,
     pub is_primary: bool,
     pub has_drawn: bool,
+    pub frame_pending: bool,
+    pub needs_redraw: bool,
     pub pool: SlotPool,
 }
 
 pub struct LockApp {
     pub conn: Connection,
+    pub qh: QueueHandle<Self>,
     pub loop_handle: LoopHandle<'static, Self>,
     pub registry_state: RegistryState,
     pub compositor_state: CompositorState,
@@ -71,8 +74,11 @@ pub struct LockApp {
     pub xdg_shell: Option<XdgShell>,
 
     pub keyboard: Option<wl_keyboard::WlKeyboard>,
-    pub pointer: Option<wl_pointer::WlPointer>,
+    pub themed_pointer: Option<ThemedPointer>,
     pub cursor_pos: (f64, f64),
+    pub current_cursor: CursorIcon,
+    pub hover_peek: bool,
+    pub hover_submit: bool,
     pub surfaces: HashMap<u32, SurfaceView>,
 
     pub cfg: Config,
@@ -152,6 +158,7 @@ impl LockApp {
 
         Ok(Self {
             conn,
+            qh: qh.clone(),
             loop_handle,
             registry_state,
             compositor_state,
@@ -162,8 +169,11 @@ impl LockApp {
             session_lock: None,
             xdg_shell,
             keyboard: None,
-            pointer: None,
+            themed_pointer: None,
             cursor_pos: (0.0, 0.0),
+            current_cursor: CursorIcon::Default,
+            hover_peek: false,
+            hover_submit: false,
             surfaces: HashMap::new(),
             cfg,
             ui,
@@ -205,6 +215,8 @@ impl LockApp {
                     height: 540,
                     is_primary: true,
                     has_drawn: false,
+                    frame_pending: false,
+                    needs_redraw: false,
                     pool,
                 },
             );
@@ -263,6 +275,8 @@ impl LockApp {
                 height: 1080,
                 is_primary,
                 has_drawn: false,
+                frame_pending: false,
+                needs_redraw: false,
                 pool,
             },
         );
@@ -322,9 +336,18 @@ impl LockApp {
     pub fn redraw_all(&mut self) {
         let surface_ids: Vec<u32> = self
             .surfaces
-            .iter()
-            .filter(|(_, v)| v.is_primary || !v.has_drawn)
-            .map(|(id, _)| *id)
+            .iter_mut()
+            .filter_map(|(id, v)| {
+                if !v.is_primary && v.has_drawn {
+                    return None;
+                }
+                if v.frame_pending {
+                    v.needs_redraw = true;
+                    None
+                } else {
+                    Some(*id)
+                }
+            })
             .collect();
         for id in surface_ids {
             self.redraw_surface(id);
@@ -365,6 +388,8 @@ impl LockApp {
             password_len: char_count,
             password_text: &self.password,
             reveal_password: self.reveal_password,
+            hover_peek: self.hover_peek,
+            hover_submit: self.hover_submit,
             capslock: self.capslock,
             error: self.auth_state == AuthState::Failure,
             glide: &self.glide,
@@ -374,10 +399,14 @@ impl LockApp {
         self.ui
             .render_frame(&mut pixmap, &self.cfg, &state, view.is_primary);
 
+        view.surface
+            .frame(&self.qh, FrameCallbackData(view.surface.clone()));
         view.surface.attach(Some(buffer.wl_buffer()), 0, 0);
         view.surface.damage_buffer(0, 0, w as i32, h as i32);
         view.surface.commit();
         view.has_drawn = true;
+        view.frame_pending = true;
+        view.needs_redraw = false;
     }
 
     pub fn unlock_and_exit(&mut self) {
@@ -500,9 +529,10 @@ impl WindowHandler for LockApp {
         let new_h = configure.new_size.1.map(|v| v.get()).unwrap_or(540);
 
         for view in self.surfaces.values_mut() {
-            if view.window.is_some() {
+            if view.window.is_some() && (view.width != new_w || view.height != new_h) {
                 view.width = new_w;
                 view.height = new_h;
+                view.has_drawn = false;
             }
         }
         self.redraw_all();
@@ -538,11 +568,17 @@ impl SeatHandler for LockApp {
             self.keyboard = Some(kbd);
         }
 
-        if cap == Capability::Pointer
-            && self.pointer.is_none()
-            && let Ok(ptr) = self.seat_state.get_pointer(qh, &seat)
-        {
-            self.pointer = Some(ptr);
+        if cap == Capability::Pointer && self.themed_pointer.is_none() {
+            let cursor_surface = self.compositor_state.create_surface(qh);
+            if let Ok(themed) = self.seat_state.get_pointer_with_theme::<_, ()>(
+                qh,
+                &seat,
+                self.shm.wl_shm(),
+                cursor_surface,
+                ThemeSpec::default(),
+            ) {
+                self.themed_pointer = Some(themed);
+            }
         }
     }
 
@@ -559,10 +595,8 @@ impl SeatHandler for LockApp {
             kbd.release();
         }
 
-        if cap == Capability::Pointer
-            && let Some(ptr) = self.pointer.take()
-        {
-            ptr.release();
+        if cap == Capability::Pointer {
+            self.themed_pointer = None;
         }
     }
 
@@ -655,6 +689,16 @@ impl PointerHandler for LockApp {
             match event.kind {
                 PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
                     self.cursor_pos = event.position;
+                    let (px, py) = (self.cursor_pos.0 as f32, self.cursor_pos.1 as f32);
+                    self.update_pointer_hover(px, py);
+                }
+                PointerEventKind::Leave { .. } => {
+                    if self.hover_peek || self.hover_submit {
+                        self.hover_peek = false;
+                        self.hover_submit = false;
+                        self.redraw_all();
+                    }
+                    self.set_cursor_icon(CursorIcon::Default);
                 }
                 PointerEventKind::Press { button: 0x110, .. } => {
                     let (px, py) = (self.cursor_pos.0 as f32, self.cursor_pos.1 as f32);
@@ -666,8 +710,15 @@ impl PointerHandler for LockApp {
     }
 }
 
+fn rect_contains(rect: tiny_skia::Rect, px: f32, py: f32) -> bool {
+    rect.x() <= px
+        && px <= rect.x() + rect.width()
+        && rect.y() <= py
+        && py <= rect.y() + rect.height()
+}
+
 impl LockApp {
-    fn handle_pointer_click(&mut self, px: f32, py: f32) {
+    fn compute_card_rects(&self) -> Option<(tiny_skia::Rect, tiny_skia::Rect, tiny_skia::Rect)> {
         let primary_view = self.surfaces.values().find(|v| v.is_primary);
         let (screen_w, screen_h) = match primary_view {
             Some(v) => (v.width as f32, v.height as f32),
@@ -679,10 +730,7 @@ impl LockApp {
         let card_x = ((screen_w - card_w) / 2.0).round();
         let card_y = ((screen_h - card_h) / 2.0).round();
 
-        let card_rect = match tiny_skia::Rect::from_xywh(card_x, card_y, card_w, card_h) {
-            Some(r) => r,
-            None => return,
-        };
+        let card_rect = tiny_skia::Rect::from_xywh(card_x, card_y, card_w, card_h)?;
 
         let mut content_y = card_y + self.cfg.card.padding_y;
         if self.cfg.card.show_avatar {
@@ -690,24 +738,55 @@ impl LockApp {
         }
         content_y += 34.0;
 
-        let (_input_rect, peek_rect, submit_rect) =
-            compute_input_row_geometry(card_rect, &self.cfg, content_y);
+        Some(compute_input_row_geometry(card_rect, &self.cfg, content_y))
+    }
 
-        if peek_rect.x() <= px
-            && px <= peek_rect.x() + peek_rect.width()
-            && peek_rect.y() <= py
-            && py <= peek_rect.y() + peek_rect.height()
-        {
+    fn set_cursor_icon(&mut self, icon: CursorIcon) {
+        if self.current_cursor != icon {
+            self.current_cursor = icon;
+            if let Some(ref mut ptr) = self.themed_pointer {
+                let _ = ptr.set_cursor(&self.conn, icon);
+            }
+        }
+    }
+
+    fn update_pointer_hover(&mut self, px: f32, py: f32) {
+        let Some((input_rect, peek_rect, submit_rect)) = self.compute_card_rects() else {
+            return;
+        };
+
+        let over_peek = self.cfg.input.show_peek_icon && rect_contains(peek_rect, px, py);
+        let over_submit = rect_contains(submit_rect, px, py);
+        let over_input = rect_contains(input_rect, px, py);
+
+        let desired_cursor = if over_peek || over_submit {
+            CursorIcon::Pointer
+        } else if over_input {
+            CursorIcon::Text
+        } else {
+            CursorIcon::Default
+        };
+        self.set_cursor_icon(desired_cursor);
+
+        if self.hover_peek != over_peek || self.hover_submit != over_submit {
+            self.hover_peek = over_peek;
+            self.hover_submit = over_submit;
+            self.redraw_all();
+        }
+    }
+
+    fn handle_pointer_click(&mut self, px: f32, py: f32) {
+        let Some((_input_rect, peek_rect, submit_rect)) = self.compute_card_rects() else {
+            return;
+        };
+
+        if self.cfg.input.show_peek_icon && rect_contains(peek_rect, px, py) {
             self.reveal_password = !self.reveal_password;
             self.update_cursor_glide();
             return;
         }
 
-        if submit_rect.x() <= px
-            && px <= submit_rect.x() + submit_rect.width()
-            && submit_rect.y() <= py
-            && py <= submit_rect.y() + submit_rect.height()
-        {
+        if rect_contains(submit_rect, px, py) {
             self.submit_auth();
         }
     }
@@ -736,9 +815,19 @@ impl CompositorHandler for LockApp {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
+        surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
+        let id = surface.id().protocol_id();
+        let should_redraw = if let Some(view) = self.surfaces.get_mut(&id) {
+            view.frame_pending = false;
+            view.needs_redraw
+        } else {
+            false
+        };
+        if should_redraw {
+            self.redraw_surface(id);
+        }
     }
 
     fn surface_enter(

@@ -13,6 +13,8 @@ pub struct CardUiState<'a> {
     pub password_len: usize,
     pub password_text: &'a str,
     pub reveal_password: bool,
+    pub hover_peek: bool,
+    pub hover_submit: bool,
     pub capslock: bool,
     pub error: bool,
     pub glide: &'a CursorGlideState,
@@ -324,7 +326,7 @@ impl UiRenderer {
         &self,
         target: &mut PixmapMut,
         cfg: &Config,
-        _state: &CardUiState,
+        state: &CardUiState,
         submit_rect: Rect,
     ) {
         let cx = submit_rect.x() + submit_rect.width() / 2.0;
@@ -334,7 +336,16 @@ impl UiRenderer {
         let mut pb = PathBuilder::new();
         pb.push_circle(cx, cy, radius);
         if let Some(circle_path) = pb.finish() {
-            let bg_color = parse_color(&cfg.appearance.accent_color, 1.0);
+            let mut bg_color = parse_color(&cfg.appearance.accent_color, 1.0);
+            if state.hover_submit {
+                bg_color = Color::from_rgba(
+                    (bg_color.red() * 1.12).min(1.0),
+                    (bg_color.green() * 1.12).min(1.0),
+                    (bg_color.blue() * 1.12).min(1.0),
+                    1.0,
+                )
+                .unwrap();
+            }
             let mut bg_paint = Paint::default();
             bg_paint.set_color(bg_color);
             bg_paint.anti_alias = true;
@@ -345,6 +356,23 @@ impl UiRenderer {
                 Transform::identity(),
                 None,
             );
+
+            if state.hover_submit {
+                let mut ring_paint = Paint::default();
+                ring_paint.set_color(parse_color(&cfg.appearance.text_color, 0.35));
+                ring_paint.anti_alias = true;
+                let ring_stroke = Stroke {
+                    width: 1.5,
+                    ..Default::default()
+                };
+                target.stroke_path(
+                    &circle_path,
+                    &ring_paint,
+                    &ring_stroke,
+                    Transform::identity(),
+                    None,
+                );
+            }
         }
 
         let icon_color = parse_color(&cfg.appearance.accent_text_color, 1.0);
@@ -484,8 +512,29 @@ impl UiRenderer {
         }
 
         if cfg.input.show_peek_icon {
+            if state.hover_peek {
+                let pcx = peek_rect.x() + peek_rect.width() / 2.0;
+                let pcy = peek_rect.y() + peek_rect.height() / 2.0;
+                let mut pb = PathBuilder::new();
+                pb.push_circle(pcx, pcy, peek_rect.width() * 0.72);
+                if let Some(bg_path) = pb.finish() {
+                    let mut bg_paint = Paint::default();
+                    bg_paint.set_color(parse_color(&cfg.appearance.text_color, 0.14));
+                    bg_paint.anti_alias = true;
+                    target.fill_path(
+                        &bg_path,
+                        &bg_paint,
+                        FillRule::Winding,
+                        Transform::identity(),
+                        None,
+                    );
+                }
+            }
+
             let peek_color = if state.reveal_password {
-                parse_color(&cfg.appearance.accent_color, 0.95)
+                parse_color(&cfg.appearance.accent_color, 0.98)
+            } else if state.hover_peek {
+                parse_color(&cfg.appearance.text_color, 0.95)
             } else if state.password_len > 0 {
                 parse_color(&cfg.appearance.muted_color, 0.85)
             } else {
