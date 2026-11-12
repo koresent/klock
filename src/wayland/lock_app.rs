@@ -41,7 +41,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::auth::{AuthResponse, AuthState, AuthWorker};
 use crate::config::Config;
-use crate::render::animations::{CursorGlideState, ShakeAnimation};
+use crate::render::animations::{CursorGlideState, FadeAnimation, ShakeAnimation, fade::FadePhase};
 use crate::render::{
     CardUiState, UiRenderer, compute_card_height, compute_input_row_geometry, load_image,
     render_circular_avatar,
@@ -93,6 +93,7 @@ pub struct LockApp {
     pub reveal_password: bool,
     pub glide: CursorGlideState,
     pub shake: ShakeAnimation,
+    pub fade: FadeAnimation,
     pub capslock: bool,
 
     pub is_windowed: bool,
@@ -186,6 +187,7 @@ impl LockApp {
             reveal_password: false,
             glide,
             shake: ShakeAnimation::new(),
+            fade: FadeAnimation::new(true, 220),
             capslock: false,
             is_windowed,
             dev_escape,
@@ -314,8 +316,7 @@ impl LockApp {
             match res {
                 AuthResponse::Success => {
                     self.auth_state = AuthState::Success;
-                    self.unlock_and_exit();
-                    return;
+                    self.fade.trigger_fade_out();
                 }
                 AuthResponse::Failure(_err) => {
                     self.auth_state = AuthState::Failure;
@@ -327,20 +328,27 @@ impl LockApp {
             }
         }
 
+        let fade_moving = self.fade.update();
+        if self.fade.is_done() {
+            self.unlock_and_exit();
+            return;
+        }
+
         let glide_moving = self.glide.update();
         let shake_moving = self.shake.is_active();
 
-        if glide_moving || shake_moving {
+        if glide_moving || shake_moving || fade_moving {
             self.redraw_all();
         }
     }
 
     pub fn redraw_all(&mut self) {
+        let fading = self.fade.phase != FadePhase::Visible;
         let surface_ids: Vec<u32> = self
             .surfaces
             .iter_mut()
             .filter_map(|(id, v)| {
-                if !v.is_primary && v.has_drawn {
+                if !fading && !v.is_primary && v.has_drawn {
                     return None;
                 }
                 if v.frame_pending {
@@ -394,6 +402,7 @@ impl LockApp {
             hover_submit: self.hover_submit,
             capslock: self.capslock,
             error: self.auth_state == AuthState::Failure,
+            fade_opacity: self.fade.opacity(),
             glide: &self.glide,
             shake: &self.shake,
         };

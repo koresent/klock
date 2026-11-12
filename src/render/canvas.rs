@@ -17,6 +17,7 @@ pub struct CardUiState<'a> {
     pub hover_submit: bool,
     pub capslock: bool,
     pub error: bool,
+    pub fade_opacity: f32,
     pub glide: &'a CursorGlideState,
     pub shake: &'a ShakeAnimation,
 }
@@ -90,22 +91,29 @@ impl UiRenderer {
             target.fill(solid);
         }
 
-        if !is_primary {
-            return;
+        if is_primary {
+            if cfg.clock.enabled {
+                self.draw_clock(target, cfg, screen_w, screen_h);
+            }
+
+            let shake_x = state.shake.offset_x();
+            let card_w = cfg.card.width;
+            let card_h = compute_card_height(cfg, state.capslock);
+            let card_x = ((screen_w - card_w) / 2.0 + shake_x).round();
+            let card_y = ((screen_h - card_h) / 2.0).round();
+
+            if let Some(card_rect) = Rect::from_xywh(card_x, card_y, card_w, card_h) {
+                self.draw_card(target, cfg, state, card_rect);
+            }
         }
 
-        if cfg.clock.enabled {
-            self.draw_clock(target, cfg, screen_w, screen_h);
-        }
-
-        let shake_x = state.shake.offset_x();
-        let card_w = cfg.card.width;
-        let card_h = compute_card_height(cfg, state.capslock);
-        let card_x = ((screen_w - card_w) / 2.0 + shake_x).round();
-        let card_y = ((screen_h - card_h) / 2.0).round();
-
-        if let Some(card_rect) = Rect::from_xywh(card_x, card_y, card_w, card_h) {
-            self.draw_card(target, cfg, state, card_rect);
+        if state.fade_opacity < 0.999 {
+            let scale = (state.fade_opacity.clamp(0.0, 1.0) * 256.0) as u32;
+            for chunk in target.data_mut().as_chunks_mut::<4>().0 {
+                chunk[0] = ((chunk[0] as u32 * scale) >> 8) as u8;
+                chunk[1] = ((chunk[1] as u32 * scale) >> 8) as u8;
+                chunk[2] = ((chunk[2] as u32 * scale) >> 8) as u8;
+            }
         }
     }
 
@@ -944,6 +952,7 @@ mod tests {
             hover_submit: true,
             capslock: true,
             error: false,
+            fade_opacity: 1.0,
             glide: &glide,
             shake: &shake,
         };
