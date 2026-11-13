@@ -59,16 +59,16 @@ impl UiRenderer {
         if self.cached_wallpapers.contains_key(&key) {
             return;
         }
-        if let Some(ref wall_img) = self.source_wallpaper {
-            if let Ok(pix) = crate::render::image::render_wallpaper(
+        if let Some(ref wall_img) = self.source_wallpaper
+            && let Ok(pix) = crate::render::image::render_wallpaper(
                 wall_img,
                 target_w,
                 target_h,
                 cfg.wallpaper.blur_sigma,
                 cfg.appearance.backdrop_dim,
-            ) {
-                self.cached_wallpapers.insert(key, pix);
-            }
+            )
+        {
+            self.cached_wallpapers.insert(key, pix);
         }
     }
 
